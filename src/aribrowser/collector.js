@@ -40,6 +40,9 @@
   const skip = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'HEAD', 'TEMPLATE', 'META', 'LINK']);
   const interactiveRoles = new Set(['link', 'button', 'textbox', 'searchbox', 'combobox', 'checkbox',
     'radio', 'slider', 'spinbutton', 'tab', 'menuitem', 'switch', 'option', 'treeitem']);
+  // 구조 컨테이너 이름에 모든 후손 텍스트를 반복하면 대형 페이지의 출력량이 폭증한다.
+  const containers = new Set(['main', 'navigation', 'banner', 'contentinfo', 'complementary', 'form',
+    'table', 'rowgroup', 'list', 'group', 'dialog', 'alertdialog', 'region', 'article', 'iframe']);
   const roles = {A: 'link', BUTTON: 'button', TEXTAREA: 'textbox', SELECT: 'combobox',
     OPTION: 'option', H1: 'heading', H2: 'heading', H3: 'heading', H4: 'heading', H5: 'heading', H6: 'heading',
     NAV: 'navigation', MAIN: 'main', HEADER: 'banner', FOOTER: 'contentinfo', ASIDE: 'complementary',
@@ -95,7 +98,7 @@
         element.getAttribute('alt') || element.getAttribute('title') ||
         (['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName)
           ? element.getAttribute('placeholder') || (role === 'button' ? element.value : '')
-          : role === 'text' ? directText : rawText));
+          : role === 'text' || containers.has(role) ? directText : rawText));
       const disabled = element.matches(':disabled') || element.closest('[inert], [aria-disabled="true"]') !== null;
       const readonly = !!element.readOnly || element.getAttribute('aria-readonly') === 'true';
       const modal = role === 'dialog' || role === 'alertdialog' || element.getAttribute('aria-modal') === 'true';

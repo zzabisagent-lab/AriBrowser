@@ -1,6 +1,7 @@
 """실제 Chromium을 통해 사용자 요구의 핵심 읽기/쓰기/세션 계약을 검증한다."""
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ async def test_semantics_identity_states_and_diff(app):
     assert name["description"] == "고객의 성명을 입력하세요"
     assert name["state"]["invalid"] and name["state"]["required"]
     assert name["groups"]["form"]
+    assert next(e for e in state["elements"] if e["role"] == "main")["name"] == ""
     assert "secret123" not in json.dumps(state)
     assert any(e["role"] == "button" and e["name"] == "그림자 버튼" for e in state["elements"])
     assert len([e for e in state["elements"] if e["name"] == "프레임 버튼"]) == 2
@@ -83,7 +85,9 @@ async def test_form_keyboard_shadow_frame_and_scroll(app):
     frame_inputs = (await command(protocol, "find", role="textbox", text="프레임 입력"))["elements"]
     for item in frame_inputs:
         await command(protocol, "action", action="fill", element=item["id"], text="iframe")
-    await command(protocol, "action", action="press", element=shadow, key="End")
+    # macOS의 End는 문서 스크롤 키이므로 네이티브 줄 끝 단축키를 사용한다.
+    end_key = "Meta+ArrowRight" if sys.platform == "darwin" else "End"
+    await command(protocol, "action", action="press", element=shadow, key=end_key)
     await command(protocol, "action", action="type", element=shadow, text="!")
     assert (await command(protocol, "detail", element=shadow))["element"]["value"] == "shadow!"
     virtual = await find_id(protocol, "list")

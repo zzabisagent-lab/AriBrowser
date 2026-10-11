@@ -82,6 +82,8 @@ UTF-8 JSON 객체 하나를 한 줄에 전송합니다. 요청은 순차 실행�
 
 사용자 정의 드롭다운은 `click` 후 항목 ID를 다시 조회해 선택합니다. Escape를 처리하지 않는 사용자 정의 모달은 닫기 버튼을 클릭하세요. 임의 JavaScript 평가/강제 클릭 명령은 제공하지 않습니다.
 
+키보드는 해당 OS의 실제 단축키 의미를 따릅니다. 예를 들어 macOS 입력 줄 끝 이동은 `Meta+ArrowRight`, Windows/Linux는 `End`입니다. 전체 선택에는 플랫폼에 맞게 해석되는 `ControlOrMeta+A`를 사용할 수 있습니다.
+
 ## 렌더
 
 ```json
