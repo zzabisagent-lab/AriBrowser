@@ -21,13 +21,19 @@ def main() -> None:
     """Chromium 번들 설치→패키징→독립 실행 검증→압축 및 SHA-256 생성을 수행한다."""
     root = Path(__file__).resolve().parents[1]
     os.chdir(root)
-    env = dict(os.environ, PLAYWRIGHT_BROWSERS_PATH="0")
+    # Chromium 앱/프레임워크를 PyInstaller가 개별 바이너리로 다시 서명하면 macOS의
+    # 중첩 번들이 깨진다. 별도 위치에 설치하고 원본 디렉터리를 패키징 뒤 복사한다.
+    browser_source = root / "build" / "browser-bundle"
+    env = dict(os.environ, PLAYWRIGHT_BROWSERS_PATH=str(browser_source))
     subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], env=env, check=True)
     subprocess.run([
         sys.executable, "-m", "PyInstaller", "--clean", "--noconfirm", "--onedir", "--noupx",
-        "--name", "aribrowser", "--collect-data", "aribrowser", "src/aribrowser/__main__.py",
+        "--name", "aribrowser", "--collect-data", "aribrowser",
+        "--additional-hooks-dir", "scripts/hooks", "src/aribrowser/__main__.py",
     ], env=env, check=True)
     bundle = root / "dist" / "aribrowser"
+    browser_target = bundle / "_internal" / "playwright" / "driver" / "package" / ".local-browsers"
+    shutil.copytree(browser_source, browser_target, symlinks=True)
     for name in ("README.md", "CHANGELOG.md", "LICENSE", "THIRD_PARTY_NOTICES.md"):
         shutil.copy2(root / name, bundle / name)
     shutil.copytree(root / "docs", bundle / "docs", dirs_exist_ok=True)
