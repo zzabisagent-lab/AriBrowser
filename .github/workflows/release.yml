@@ -32,9 +32,15 @@ jobs:
       - name: Install Chromium and system libraries
         run: python -m playwright install --with-deps chromium
       - name: Check source and run browser integration tests
+        shell: bash
+        # 실패한 테스트를 GitHub 주석(::error::)으로도 남겨 로그 없이도 원인을 볼 수 있게 한다.
         run: |
           python -m ruff check src tests scripts
-          python -m pytest -q --junitxml=test-results.xml
+          set -o pipefail
+          python -m pytest -q --junitxml=test-results.xml -rf --tb=short 2>&1 | tee pytest.log
+          status=${PIPESTATUS[0]}
+          grep -E "^(FAILED|ERROR) " pytest.log | head -n 10 | sed 's/^/::error::/' || true
+          exit $status
       - name: Build and smoke-test bundled executable
         run: python scripts/build.py
       - uses: actions/upload-artifact@v4

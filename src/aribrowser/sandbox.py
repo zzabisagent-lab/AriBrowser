@@ -16,6 +16,7 @@ Chromium은 `Chromium sandboxing failed!`로 종료된다. 같은 메시지는 r
 """
 
 import getpass
+import json
 import os
 import platform
 import shutil
@@ -72,10 +73,37 @@ def chromium_layout(executable_path: str) -> dict:
             "browsers_root": str(browsers_root), "headless_shell": str(chosen) if chosen else None}
 
 
+def registry_versions() -> dict[str, str]:
+    """Playwright 브라우저 레지스트리(browsers.json)에서 디렉터리 이름 → 브라우저 버전 표를 만든다.
+
+    예: {"chromium-1243": "153.0.8010.12", "chromium_headless_shell-1243": "153.0.8010.12"}.
+    실행 파일을 띄우지 않고 버전을 알 수 있어 빠르고, Windows처럼 GUI 실행 파일이
+    `--version`을 콘솔에 출력하지 않는 환경에서도 동작한다.
+    """
+    try:
+        import playwright
+
+        registry = Path(playwright.__file__).parent / "driver" / "package" / "browsers.json"
+        data = json.loads(registry.read_text(encoding="utf-8"))
+    except (OSError, ValueError, ImportError):
+        return {}
+    versions = {}
+    for browser in data.get("browsers", []):
+        if browser.get("browserVersion"):
+            versions[f"{browser['name'].replace('-', '_')}-{browser['revision']}"] = browser["browserVersion"]
+    return versions
+
+
 def chromium_version(executable: str | None) -> str | None:
-    """`--version` 출력으로 Chromium 버전을 읽는다. 샌드박스를 시작하지 않는 호출이다."""
+    """번들 Chromium의 버전을 읽는다. 레지스트리를 우선하고, 없으면 `--version` 실행 결과를 쓴다."""
     if not executable or not Path(executable).is_file():
         return None
+    versions = registry_versions()
+    for parent in Path(executable).resolve().parents:
+        if parent.name in versions:
+            return f"Chromium {versions[parent.name]}"
+    if sys.platform == "win32":
+        return None  # Windows의 chrome.exe는 GUI 서브시스템이라 --version을 콘솔에 쓰지 않는다.
     try:
         output = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=15,
                                 env={**os.environ, "DISPLAY": os.environ.get("DISPLAY", "")})
