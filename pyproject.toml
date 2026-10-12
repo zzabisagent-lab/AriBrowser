@@ -11,7 +11,7 @@ requires-python = ">=3.10"
 dependencies = ["playwright==1.63.0", "Pillow==12.3.0", "psutil==7.2.2"]
 
 [project.optional-dependencies]
-dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "ruff==0.17.0", "pyinstaller==6.22.3"]
+dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "pytest-timeout==2.4.0", "ruff==0.17.0", "pyinstaller==6.22.3"]
 
 [project.scripts]
 aribrowser = "aribrowser.cli:main"
@@ -21,6 +21,7 @@ aribrowser = ["*.js"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+timeout = 300
 testpaths = ["tests"]
 
 [tool.ruff]

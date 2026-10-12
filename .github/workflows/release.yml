@@ -33,12 +33,15 @@ jobs:
         run: python -m playwright install --with-deps chromium
       - name: Check source and run browser integration tests
         shell: bash
+        timeout-minutes: 25
         # 실패한 테스트를 GitHub 주석(::error::)으로도 남겨 로그 없이도 원인을 볼 수 있게 한다.
+        # 파이프(tee)는 쓰지 않는다. Windows에서 잔여 Chromium 자식 프로세스가 파이프 핸들을 물려받아
+        # pytest가 끝난 뒤에도 EOF가 오지 않아 단계가 멈출 수 있다. 파일로 리디렉션하면 그런 문제가 없다.
         run: |
           python -m ruff check src tests scripts
-          set -o pipefail
-          python -m pytest -q --junitxml=test-results.xml -rf --tb=short 2>&1 | tee pytest.log
-          status=${PIPESTATUS[0]}
+          status=0
+          python -m pytest -q --junitxml=test-results.xml -rf --tb=short --timeout=300 > pytest.log 2>&1 || status=$?
+          cat pytest.log
           grep -E "^(FAILED|ERROR) " pytest.log | head -n 10 | sed 's/^/::error::/' || true
           exit $status
       - name: Build and smoke-test bundled executable
