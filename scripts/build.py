@@ -2,10 +2,16 @@
 
 PyInstaller는 교차 컴파일러가 아니므로 각 OS의 네이티브 CI에서 실행한다.
 압축 파일에는 실행 파일, 런타임 디렉터리, 사용 설명서와 라이선스를 포함한다.
+
+패키징 뒤에는 번들 바이너리로 `--doctor`와 `--self-test`를 실행해 실제 Chromium
+실행을 검증한다. 호스트가 샌드박스를 지원하지 않을 때(Ubuntu 24.04의 AppArmor
+userns 제한, root 실행 등)만 `--no-sandbox`로 다시 검증하고 그 사실을 출력한다.
+런타임에서는 어떤 경우에도 `--no-sandbox`를 자동으로 켜지 않는다.
 """
 
 import hashlib
 import importlib.metadata
+import json
 import os
 import platform
 import shutil
@@ -15,6 +21,32 @@ import tempfile
 from pathlib import Path
 
 from aribrowser import __version__
+
+
+def smoke_test(binary: Path) -> None:
+    """번들 바이너리의 진단과 자체 검사를 실행한다. 샌드박스 불가 호스트에서만 --no-sandbox로 재시도한다."""
+    with tempfile.TemporaryDirectory(prefix="ari-binary-test-") as directory:
+        # 사용자 캐시를 비워도 실행되어야 Chromium 포함 여부를 실제로 검증할 수 있다.
+        env = dict(os.environ)
+        env.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+        doctor = subprocess.run([str(binary), "--doctor", "--data-dir", directory], env=env, capture_output=True,
+                                text=True, encoding="utf-8", timeout=180)
+        report = json.loads(doctor.stdout) if doctor.stdout.strip() else {}
+        print("doctor:", json.dumps(report.get("summary"), ensure_ascii=False), file=sys.stderr)
+        if not report.get("chromium", {}).get("exists"):
+            raise SystemExit(f"번들 Chromium을 찾지 못했습니다: {report.get('chromium')}")
+        smoke = [str(binary), "--self-test", "--data-dir", directory]
+        result = subprocess.run(smoke, env=env, capture_output=True, text=True, encoding="utf-8", timeout=120)
+        if result.returncode == 0:
+            print("self-test (sandboxed):", result.stdout.strip(), file=sys.stderr)
+            return
+        code = report.get("summary", {}).get("error_code") or ""
+        if sys.platform.startswith("linux") and (code.startswith("SANDBOX_") or "sandbox" in result.stdout.lower()):
+            print(f"WARNING: 이 호스트는 Chromium 샌드박스를 지원하지 않습니다({code}). 번들 검증만 --no-sandbox로 재시도합니다.",
+                  file=sys.stderr)
+            subprocess.run(smoke + ["--no-sandbox"], env=env, check=True, timeout=120)
+            return
+        raise SystemExit(f"self-test 실패:\n{result.stdout}\n{result.stderr}")
 
 
 def main() -> None:
@@ -49,14 +81,7 @@ def main() -> None:
                     target_dir.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(source, target_dir / source.name)
     binary = bundle / ("aribrowser.exe" if sys.platform == "win32" else "aribrowser")
-    with tempfile.TemporaryDirectory(prefix="ari-binary-test-") as directory:
-        # 사용자 캐시를 비워도 실행되어야 Chromium 포함 여부를 실제로 검증할 수 있다.
-        smoke_env = dict(os.environ)
-        smoke_env.pop("PLAYWRIGHT_BROWSERS_PATH", None)
-        smoke = [str(binary), "--self-test", "--data-dir", directory]
-        if sys.platform.startswith("linux"):
-            smoke.append("--no-sandbox")
-        subprocess.run(smoke, env=smoke_env, check=True, timeout=90)
+    smoke_test(binary)
     system = {"darwin": "macos", "win32": "windows"}.get(sys.platform, "linux")
     arch = {"AMD64": "x64", "x86_64": "x64", "aarch64": "arm64"}.get(platform.machine(), platform.machine())
     name = f"aribrowser-{__version__}-{system}-{arch}"

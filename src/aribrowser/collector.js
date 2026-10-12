@@ -1,42 +1,25 @@
 /**
  * Chromium 문서 안에서 DOM, ARIA, 계산된 레이아웃을 의미 트리로 변환한다.
- * DOM 속성을 덧붙이지 않고 WeakMap으로 노드 정체성을 기억한다. 따라서 SPA의
+ * 노드 정체성은 registry.js의 WeakMap 레지스트리가 기억한다. 따라서 SPA의
  * 동일 노드는 ID를 유지하고, 재생성된 노드/새 문서는 반드시 새 ID를 받는다.
  * 이 코드는 페이지 데이터를 읽는 코드이며 페이지 텍스트를 명령으로 실행하지 않는다.
+ * 반환하는 ID는 긴 내부 ID이며 Python 쪽에서 짧은 Agent용 ID로 변환된다.
  */
-({prefix, maxNodes = 50000, includeDecorative = false}) => {
-  const key = '__aribrowser_v001__';
-  if (!window[key]) {
-    const nodeIds = new WeakMap();
-    const nodes = new Map();
-    const documentId = crypto.randomUUID ? crypto.randomUUID() :
-      [...crypto.getRandomValues(new Uint8Array(16))].map(byte => byte.toString(16).padStart(2, '0')).join('');
-    let sequence = 0;
-    window[key] = {
-      nodes, nodeIds, documentId,
-      /** 노드가 살아 있는 동안 ID를 유지한다. WeakRef는 제거된 DOM의 메모리 누수를 막는다. */
-      identify(node) {
-        if (!nodeIds.has(node)) {
-          const id = `${prefix}-${documentId}-e${++sequence}`;
-          nodeIds.set(node, id);
-          nodes.set(id, new WeakRef(node));
-        }
-        return nodeIds.get(node);
-      },
-      /** 제거/탐색 이후의 ID는 다른 요소로 재사용하지 않고 null로 반환한다. */
-      get(id) {
-        const node = nodes.get(id)?.deref();
-        return node?.isConnected ? node : null;
-      }
-    };
-  }
-  const registry = window[key];
-  for (const [id, ref] of registry.nodes) {
-    if (!ref.deref()?.isConnected) registry.nodes.delete(id);
-  }
+({prefix, maxNodes = 50000, maxElements = 20000, maxHiddenNodes = 5000, includeDecorative = false}) => {
+  // 공용 레지스트리(registry.js)가 Python에서 아래 자리에 삽입된다.
+  const registry = (/*REGISTRY*/)(prefix);
+  registry.prune();
   const output = [];
   let visited = 0;
+  let hiddenVisited = 0;
   let truncated = false;
+  let hiddenTruncated = false;
+  // 전송량이 성능을 좌우하므로 기본값과 같은 상태/빈 필드는 생략한 압축 형태로 만들고
+  // Python(expand_element)이 전체 스키마로 되돌린다. 결과는 JSON 문자열로 반환한다.
+  // CDP의 구조화 직렬화는 대형 객체에서 문자열 전달보다 수 배 느리기 때문이다.
+  const stateDefaults = {visible: true, in_viewport: true, occluded: false, disabled: false, readonly: false,
+    selected: false, checked: false, expanded: null, invalid: false, required: false, focused: false,
+    accessibility_hidden: false, actionable: true};
   const skip = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'HEAD', 'TEMPLATE', 'META', 'LINK']);
   const interactiveRoles = new Set(['link', 'button', 'textbox', 'searchbox', 'combobox', 'checkbox',
     'radio', 'slider', 'spinbutton', 'tab', 'menuitem', 'switch', 'option', 'treeitem']);
@@ -73,12 +56,14 @@
   }
   /** 부모 우선으로 탐색하여 영역·폼·표의 소속과 깊이를 보존한다. */
   function visit(element, parent, groups, ancestorHidden) {
-    if (++visited > maxNodes) { truncated = true; return; }
+    if (++visited > maxNodes || output.length >= maxElements) { truncated = true; return; }
     if (skip.has(element.tagName)) return;
     const role = roleOf(element);
     const css = getComputedStyle(element);
     const rect = element.getBoundingClientRect();
     const hidden = ancestorHidden || css.display === 'none' || css.contentVisibility === 'hidden' || Number(css.opacity) === 0;
+    // 숨겨진 메가 메뉴/템플릿이 수만 개 노드를 가질 수 있어 숨김 서브트리에는 별도 상한을 둔다.
+    if (hidden && ++hiddenVisited > maxHiddenNodes) { hiddenTruncated = true; return; }
     const visible = !hidden && css.visibility !== 'hidden' && css.visibility !== 'collapse'
       && Number(css.opacity) !== 0 && rect.width > 0 && rect.height > 0;
     const inViewport = visible && rect.bottom > 0 && rect.right > 0
@@ -147,19 +132,37 @@
       } : null;
       const text = ['text', 'paragraph', 'heading', 'cell', 'columnheader', 'rowheader', 'label', 'code',
         'button', 'link', 'alert', 'status', 'option'].includes(role) ? (role === 'text' ? directText : rawText) : directText;
-      output.push({id, parent, role, tag: element.tagName.toLowerCase(), name: name.slice(0, 4000),
-        text: text.slice(0, 8000), text_truncated: text.length > 8000 || name.length > 4000,
-        value, labels, description: normalize(references(element, 'aria-describedby')),
-        validation_message: element.validationMessage || '', href: element.href || null,
-        input_type: element.type || null, state, actions, groups: nextGroups,
-        bounds: {x: Math.round(rect.x * 100) / 100, y: Math.round(rect.y * 100) / 100,
-          width: Math.round(rect.width * 100) / 100, height: Math.round(rect.height * 100) / 100},
-        style: {emphasis: Number(css.fontWeight) >= 600 ? 'strong' : 'normal',
-          meaning: state.invalid || role === 'alert' ? 'warning' : 'normal',
-          visibility: visible ? 'visible' : 'hidden', position: modal ? 'modal' : css.position === 'fixed' ? 'fixed' : 'flow'},
-        media, accessibility_source: 'dom-aria',
-        row_index: element.getAttribute('aria-rowindex'), column_index: element.getAttribute('aria-colindex'),
-        set_size: element.getAttribute('aria-setsize'), position_in_set: element.getAttribute('aria-posinset')});
+      // 압축 항목: 생략된 키는 Python이 기본값으로 채운다(expand_element 참고).
+      const item = {id, role, tag: element.tagName.toLowerCase(),
+        b: [Math.round(rect.x), Math.round(rect.y), Math.round(rect.width), Math.round(rect.height)]};
+      if (parent) item.parent = parent;
+      if (name) item.name = name.slice(0, 4000);
+      if (text !== name) item.text = text.slice(0, 8000);  // 이름과 같으면 생략, 다르면 빈 문자열도 전송
+      if (text.length > 8000 || name.length > 4000) item.text_truncated = true;
+      if (value != null && value !== '') item.value = value;
+      if (labels.length) item.labels = labels;
+      const description = normalize(references(element, 'aria-describedby'));
+      if (description) item.description = description;
+      if (element.validationMessage) item.validation_message = element.validationMessage;
+      if (element.href) item.href = element.href;
+      if (typeof element.type === 'string' && element.type && ['INPUT', 'BUTTON', 'SELECT', 'TEXTAREA'].includes(element.tagName)) item.input_type = element.type;
+      const diff = {};
+      for (const key of Object.keys(state)) if (state[key] !== stateDefaults[key]) diff[key] = state[key];
+      if (Object.keys(diff).length) item.state = diff;
+      if (actions.length) item.actions = actions;
+      if (Object.keys(nextGroups).length) item.groups = nextGroups;
+      const emphasis = Number(css.fontWeight) >= 600;
+      const position = modal ? 'modal' : css.position === 'fixed' ? 'fixed' : null;
+      if (emphasis || state.invalid || role === 'alert' || position) {
+        item.style = {emphasis: emphasis ? 'strong' : 'normal', meaning: state.invalid || role === 'alert' ? 'warning' : 'normal',
+          visibility: visible ? 'visible' : 'hidden', position: position || 'flow'};
+      }
+      if (media) item.media = media;
+      for (const [key, attr] of [['row_index', 'aria-rowindex'], ['column_index', 'aria-colindex'], ['set_size', 'aria-setsize'], ['position_in_set', 'aria-posinset']]) {
+        const attribute = element.getAttribute(attr);
+        if (attribute != null) item[key] = attribute;
+      }
+      output.push(item);
       nextParent = id;
     }
     // open Shadow DOM을 동일한 의미 트리로 순회한다. iframe은 호스트에서 별도로 순회한다.
@@ -172,7 +175,8 @@
     }
   }
   if (document.body) visit(document.body, null, {}, false);
-  return {elements: output, document_id: registry.documentId, visited, truncated,
+  return JSON.stringify({elements: output, document_id: registry.documentId, visited, truncated,
+    hidden_truncated: hiddenTruncated, hidden_visited: hiddenVisited,
     viewport: {width: innerWidth, height: innerHeight, scroll_x: scrollX, scroll_y: scrollY},
-    ready_state: document.readyState};
+    ready_state: document.readyState});
 }

@@ -8,6 +8,7 @@ AriBrowser 배포 파일에는 다음 오픈 소스 구성 요소와 그 종속 
 | Chromium / Chrome for Testing | BSD-style and bundled third-party licenses | https://chromium.googlesource.com/chromium/src/ |
 | Python | PSF License | https://www.python.org/psf/license/ |
 | Pillow | MIT-CMU | https://github.com/python-pillow/Pillow |
+| psutil | BSD-3-Clause | https://github.com/giampaolo/psutil |
 | greenlet | MIT / PSF | https://github.com/python-greenlet/greenlet |
 | pyee | MIT | https://github.com/jfhbrook/pyee |
 | typing-extensions | PSF | https://github.com/python/typing_extensions |

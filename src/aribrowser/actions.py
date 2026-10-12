@@ -1,6 +1,17 @@
-"""요소 ID를 실제 Chromium 입력으로 바꾸고 조작 전후의 의미 차이를 반환한다."""
+"""요소 ID를 실제 Chromium 입력으로 바꾸고 조작 전후의 의미 차이와 검증 결과를 반환한다.
+
+v0.1.0의 조작 응답은 세 단계를 구분한다.
+- `action_dispatched`: Playwright가 입력을 실제로 전달했다(오류 없이 완료).
+- `event_received`: 페이지가 해당 DOM 이벤트를 실제로 받았다. 조작 직전에 요소에
+  설치한 캡처 단계 리스너(activity.js의 probe)가 근거다. 문서가 교체되어 읽을 수
+  없으면 null이며, 그 경우 `navigation`으로 탐색 발생 여부를 알 수 있다.
+- `expected_state_reached`: Agent가 `expect`로 지정한 기대 상태(URL/텍스트/선택자/
+  값/네트워크 안정 등)에 도달했다. 도달하지 못하면 `EXPECTATION_NOT_MET` 오류로
+  원인을 돌려주어 미완료 작업을 성공으로 오인하지 않게 한다.
+"""
 
 import asyncio
+import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -8,10 +19,42 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from .errors import BrowserError
+from .waiting import baseline_of, parse_conditions, parse_timeout, wait_for
 
 ELEMENT_ACTIONS = {"click", "open_link", "double_click", "hover", "fill", "type", "clear", "check",
                    "uncheck", "select", "upload", "submit", "scroll_into_view", "close_modal", "drag_drop"}
 PAGE_ACTIONS = {"back", "forward", "reload", "press", "scroll", "coordinate_click"}
+NAVIGATION_ACTIONS = {"back", "forward", "reload"}
+
+# 조작별로 페이지가 받아야 하는 DOM 이벤트. 하나라도 관측되면 event_received=true다.
+PROBE_EVENTS = {
+    "click": ["click", "mousedown", "pointerdown"], "open_link": ["click", "mousedown", "pointerdown"],
+    "double_click": ["dblclick", "click"], "hover": ["mouseover", "pointerover", "mouseenter"],
+    "fill": ["input", "change"], "type": ["input", "keydown"], "clear": ["input", "change"],
+    "check": ["change", "click"], "uncheck": ["change", "click"], "select": ["change", "input"],
+    "upload": ["change", "input"], "submit": ["submit"], "close_modal": ["close", "cancel", "keydown"],
+    "drag_drop": ["dragstart", "dragend", "pointerdown", "mousedown"], "press": ["keydown", "keyup"],
+    "coordinate_click": ["click", "mousedown", "pointerdown"], "scroll": ["scroll", "wheel"],
+    "scroll_into_view": ["scroll"],
+}
+
+# 조작 직전 요소(또는 문서)에 일회성 캡처 리스너를 설치한다. submit은 소속 폼에서 듣는다.
+PROBE_INSTALL = """(el, [token, names]) => {
+  const activity = window.__aribrowser_activity__;
+  if (!activity) return false;
+  let target = el;
+  if (names.includes('submit') && !(el instanceof HTMLFormElement)) target = el.form || el.closest('form') || el;
+  if (names.includes('scroll') && !(el instanceof HTMLFormElement)) target = document;
+  activity.probe(target, token, names);
+  return true;
+}"""
+PROBE_INSTALL_DOCUMENT = """([token, names]) => {
+  const activity = window.__aribrowser_activity__;
+  if (!activity) return false;
+  activity.probe(document, token, names);
+  return true;
+}"""
+PROBE_READ = "token => window.__aribrowser_activity__ ? window.__aribrowser_activity__.read(token) : null"
 
 
 def validate_url(url: str) -> str:
@@ -28,39 +71,113 @@ async def settle(page, milliseconds: int = 150) -> None:
     await asyncio.sleep(milliseconds / 1000)
 
 
+# navigate/action 응답을 만들 때 snapshot으로 그대로 넘기는 출력 옵션.
+VIEW_OPTIONS = {"format", "fields", "compact", "max_bytes", "max_elements", "max_tokens", "limit", "offset",
+                "include_hidden", "region", "max_regions", "max_headings"}
+
+
+def view_options(options: dict) -> dict:
+    """조작/탐색 매개변수에서 출력 옵션만 골라낸다."""
+    return {key: value for key, value in options.items() if key in VIEW_OPTIONS}
+
+
+def parse_expect(options: dict, default_timeout: int) -> tuple[dict | None, int]:
+    """expect 매개변수를 대기 조건으로 검증한다. 없으면 (None, timeout)이다."""
+    expect = options.get("expect")
+    if expect is None:
+        return None, default_timeout
+    if not isinstance(expect, dict):
+        raise BrowserError("INVALID_ARGUMENT", "expect는 대기 조건 객체입니다.")
+    conditions = parse_conditions(expect)
+    return conditions, parse_timeout(expect.get("timeout_ms"), default_timeout)
+
+
+async def verify_expectation(browser, tab, expect: dict | None, timeout_ms: int, baseline: dict, verification: dict) -> None:
+    """expect가 있으면 조건을 기다리고 결과를 verification에 기록한다. 실패는 오류다."""
+    if expect is None:
+        verification["expected_state_reached"] = None
+        return
+    outcome = await wait_for(browser, tab, expect, timeout_ms, baseline)
+    verification["expected_state_reached"] = outcome["satisfied"]
+    verification["met"] = outcome["met"]
+    verification["unmet"] = outcome["unmet"]
+    verification["waited_ms"] = outcome["waited_ms"]
+    if not outcome["satisfied"]:
+        try:
+            title = await asyncio.wait_for(tab.page.title(), 2)
+        except Exception:
+            title = ""
+        raise BrowserError("EXPECTATION_NOT_MET", "조작은 전달되었지만 기대한 페이지 상태에 도달하지 못했습니다.",
+                           verification=verification, unmet=outcome["unmet"], met=outcome["met"],
+                           page={"url": tab.page.url, "title": title},
+                           reason="; ".join(f"{u['condition']}: expected {u['expected']!r}, actual {u['actual']!r}" for u in outcome["unmet"]))
+
+
 async def navigate(browser, url: str, tab_id: str | None = None, **options) -> dict:
-    """실제 Chromium 탐색 후 URL/HTTP 상태와 변경분을 반환한다."""
+    """실제 Chromium 탐색 후 기본으로 페이지 요약을 반환한다. mode로 변경분/전체 화면을 고를 수 있다."""
     url = validate_url(url)
     if not browser.tabs:
         await browser.create_profile()
     tab = browser.get_tab(tab_id)
+    expect, timeout_ms = parse_expect(options, browser.config.timeout_ms)
     if tab.previous is None:
         tab.previous = await browser.observe(tab)
+    baseline = baseline_of(browser, tab)
     try:
-        await tab.page.goto(url, wait_until="domcontentloaded")
+        response = await tab.page.goto(url, wait_until="domcontentloaded")
+        # 대형 페이지는 DOMContentLoaded 직후 스크립트가 DOM을 크게 바꾸므로 load를 짧게 기다린다.
+        # 느린 자원 때문에 영원히 기다리지는 않는다(최대 timeout_ms, 10초 상한).
+        try:
+            await tab.page.wait_for_load_state("load", timeout=min(browser.config.timeout_ms, 10000))
+        except PlaywrightTimeout:
+            pass
         await settle(tab.page, options.get("settle_ms", 150))
     except PlaywrightTimeout as error:
         raise BrowserError("PAGE_UNRESPONSIVE", "탐색 제한 시간이 지났습니다.", url=url) from error
     except PlaywrightError as error:
         raise BrowserError("NETWORK_FAILED", str(error), url=url) from error
-    return await browser.snapshot(tab.id, mode=options.get("mode", "changes"))
+    verification = {"action_dispatched": True, "navigation": True,
+                    "http_status": response.status if response else tab.status}
+    await verify_expectation(browser, tab, expect, timeout_ms, baseline, verification)
+    result = await browser.snapshot(tab.id, mode=options.get("mode", "summary"), **view_options(options))
+    result["verification"] = verification
+    return result
 
 
 async def act(browser, action: str, tab_id: str | None = None, **options) -> dict:
-    """조작 직전 전체 상태를 확보하고 성공 후 변경분 또는 요청한 화면을 반환한다."""
+    """조작 직전 전체 상태를 확보하고 전달/수신/기대 상태를 검증한 뒤 변경분 또는 요청한 화면을 반환한다."""
     if action not in ELEMENT_ACTIONS | PAGE_ACTIONS:
         raise BrowserError("INVALID_ARGUMENT", "지원하지 않는 조작입니다.", action=action)
     tab = browser.get_tab(tab_id)
     settle_ms = options.get("settle_ms", 150)
     if type(settle_ms) is not int or not 0 <= settle_ms <= 5000:
         raise BrowserError("INVALID_ARGUMENT", "settle_ms는 0~5000 정수입니다.")
+    verify = options.get("verify", True)
+    if not isinstance(verify, bool):
+        raise BrowserError("INVALID_ARGUMENT", "verify는 true/false입니다.")
+    expect, timeout_ms = parse_expect(options, browser.config.timeout_ms)
     element = None
+    probe_frame = tab.page.main_frame
     if action in ELEMENT_ACTIONS:
         if not isinstance(options.get("element"), str):
             raise BrowserError("INVALID_ARGUMENT", "이 조작에는 element ID가 필요합니다.")
         element = await browser.element_handle(tab, options["element"])
+        # 이벤트 기록은 요소가 속한 프레임 창에 남으므로 같은 프레임에서 읽어야 한다.
+        probe_frame = tab.elements.get(tab.ids.short(tab.ids.resolve(options["element"]))) or probe_frame
     if tab.previous is None:
         tab.previous = await browser.observe(tab)
+    baseline = baseline_of(browser, tab)
+    token = uuid.uuid4().hex[:12]
+    names = PROBE_EVENTS.get(action, [])
+    probe_installed = False
+    if verify and names:
+        try:
+            if element is not None:
+                probe_installed = bool(await element.evaluate(PROBE_INSTALL, [token, names]))
+            else:
+                probe_installed = bool(await probe_frame.evaluate(PROBE_INSTALL_DOCUMENT, [token, names]))
+        except PlaywrightError:
+            probe_installed = False
     try:
         await perform(browser, tab, element, action, options)
         await settle(tab.page, settle_ms)
@@ -73,7 +190,47 @@ async def act(browser, action: str, tab_id: str | None = None, **options) -> dic
     finally:
         if element:
             await element.dispose()
-    return await browser.snapshot(tab.id, mode=options.get("mode", "changes"))
+    verification = await inspect(browser, tab, action, token, probe_frame if probe_installed else None, baseline, verify)
+    await verify_expectation(browser, tab, expect, timeout_ms, baseline, verification)
+    result = await browser.snapshot(tab.id, mode=options.get("mode", "changes"), **view_options(options))
+    result["verification"] = verification
+    result.setdefault("delta", {})["url"] = {"before": baseline["url"], "after": tab.page.url} if tab.page.url != baseline["url"] else None
+    return result
+
+
+async def inspect(browser, tab, action: str, token: str, probe_frame, baseline: dict, verify: bool) -> dict:
+    """조작 뒤 이벤트 수신 여부와 탐색 발생 여부를 읽어 검증 블록을 만든다.
+
+    probe_frame은 탐지기를 설치한 프레임이며 None이면 설치에 실패한 것이다.
+    """
+    navigated = tab.page.url != baseline["url"] or any(
+        e["seq"] > baseline["sequence"] and e.get("tab") == tab.id and e["type"] in {"navigation", "loading_started"}
+        for e in browser.events)
+    verification = {"action_dispatched": True, "event_received": None, "events": [], "navigation": navigated}
+    if not verify:
+        verification["event_received"] = None
+        verification["reason"] = "verify=false"
+        return verification
+    if action in NAVIGATION_ACTIONS:
+        verification["event_received"] = navigated
+        verification["reason"] = None if navigated else "탐색 이벤트가 관측되지 않았습니다(방문 기록 끝 또는 동일 문서)."
+        return verification
+    if probe_frame is None:
+        verification["reason"] = "이벤트 탐지기를 설치하지 못했습니다(활동 추적기 없음)."
+        return verification
+    try:
+        received = await asyncio.wait_for(probe_frame.evaluate(PROBE_READ, token), 2)
+    except (PlaywrightError, asyncio.TimeoutError):
+        received = None
+    if received is None:
+        verification["event_received"] = None
+        verification["reason"] = "문서가 교체되어 이벤트 기록을 읽을 수 없습니다." if navigated else "이벤트 기록을 읽지 못했습니다."
+    else:
+        verification["events"] = received
+        verification["event_received"] = bool(received)
+        if not received:
+            verification["reason"] = "페이지가 입력 이벤트를 받지 못했습니다. 가림/비활성화/리스너 없음을 의심하세요."
+    return verification
 
 
 async def perform(browser, tab, element, action: str, options: dict) -> None:

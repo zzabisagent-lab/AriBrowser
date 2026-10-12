@@ -2,9 +2,16 @@
 
 웹사이트는 실제 Chromium에서 실행한다. 쿠키·IndexedDB·로컬 저장소는 프로필
 디렉터리에 보존하며 페이지 데이터는 표준입출력 명령과 별도의 신뢰 경계에 둔다.
+
+v0.1.0에서 추가된 책임:
+- 탭별 진행 중 네트워크 요청 수와 마지막 네트워크 활동 시각을 추적한다(SPA 로딩 감지).
+- 프로필 실행 전 잔여 잠금을 진단·복구하고, 실행 실패를 샌드박스/권한/의존성 코드로 구분한다.
+- 프로필 종료 후 Chromium 프로세스의 실제 종료와 잠금 해제를 확인해 보고한다.
+- 탭마다 짧은 요소 ID 레지스트리를 둔다.
 """
 
 import asyncio
+import os
 import re
 import time
 import uuid
@@ -16,12 +23,19 @@ from weakref import WeakKeyDictionary
 from playwright.async_api import BrowserContext, Page, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
+from . import processes, sandbox
 from .errors import BrowserError
+from .ids import IdRegistry
 
 
 @dataclass
 class Config:
-    """data_dir는 세션/다운로드 저장소, timeout_ms는 개별 브라우저 작업 상한이다."""
+    """data_dir는 세션/다운로드 저장소, timeout_ms는 개별 브라우저 작업 상한이다.
+
+    max_bytes는 관측 명령 응답의 세션 기본 바이트 상한이다(0이면 무제한). 요청마다
+    max_bytes/max_elements/max_tokens로 재지정할 수 있다. no_sandbox는 명시적으로
+    요청했을 때만 True가 되며 어떤 실패 경로에서도 자동으로 켜지지 않는다.
+    """
 
     data_dir: Path = field(default_factory=lambda: Path.home() / ".aribrowser")
     headless: bool = True
@@ -32,11 +46,19 @@ class Config:
     mobile: bool = False
     media_policy: str = "defer"
     executable_path: str | None = None
+    max_bytes: int = 500_000
 
 
 @dataclass
 class Tab:
-    """탭별 마지막 전체 관측과 이벤트 위치를 보관하여 부분 출력 간섭을 방지한다."""
+    """탭별 마지막 전체 관측과 이벤트 위치를 보관하여 부분 출력 간섭을 방지한다.
+
+    - elements: 짧은 요소 ID → 해당 요소가 속한 Playwright 프레임.
+    - ids: 짧은 ID와 긴 내부 ID의 양방향 변환기.
+    - inflight: 아직 완료되지 않은 네트워크 요청 키. 비어 있고 last_network 이후
+      일정 시간이 지나면 네트워크가 안정된 것으로 본다.
+    - main_frame_id: 주 문서 프레임의 ID. compact 출력에서 frame 생략 기준이다.
+    """
 
     id: str
     profile: str
@@ -50,6 +72,15 @@ class Tab:
     elements: dict = field(default_factory=dict)
     dialog: object | None = None
     dialog_policy: dict = field(default_factory=lambda: {"action": "dismiss"})
+    ids: IdRegistry = field(default=None)
+    inflight: set = field(default_factory=set)
+    last_network: float = field(default_factory=time.monotonic)
+    main_frame_id: str | None = None
+
+    def __post_init__(self):
+        """ID 레지스트리는 탭 ID를 접두사로 쓰므로 생성 직후 만든다."""
+        if self.ids is None:
+            self.ids = IdRegistry(self.id)
 
 
 class Engine:
@@ -73,6 +104,9 @@ class Engine:
         self.downloads: dict[str, dict] = {}
         self.tasks: set[asyncio.Task] = set()
         self.closing = False
+        # 프로필 이름 → Chromium 사용자 데이터 디렉터리. 프로세스/잠금 추적의 기준이다.
+        self.profile_dirs: dict[str, Path] = {}
+        self.close_report: dict | None = None
 
     def emit(self, kind: str, **data) -> None:
         """시간/증가 번호가 있는 이벤트를 저장한다. 웹 원문은 항상 데이터 필드에만 둔다."""
@@ -118,21 +152,43 @@ class Engine:
         profile_dir = self.config.data_dir / "profiles" / name
         profile_dir.mkdir(parents=True, exist_ok=True)
         profile_dir.chmod(0o700)
-        context = await self.playwright.chromium.launch_persistent_context(
-            str(profile_dir), headless=self.config.headless,
-            executable_path=self.config.executable_path,
-            chromium_sandbox=not self.config.no_sandbox,
-            viewport=viewport, is_mobile=options.get("mobile", self.config.mobile),
-            has_touch=options.get("mobile", self.config.mobile),
-            device_scale_factor=options.get("device_scale_factor", 1),
-            accept_downloads=True, service_workers="block" if policy == "defer" else "allow",
-            args=["--autoplay-policy=user-gesture-required"],
-        )
+        # 비정상 종료가 남긴 잠금은 복구하고, 살아 있는 프로세스의 잠금은 충돌로 보고한다.
+        lock = processes.release_stale_lock(profile_dir)
+        if lock["present"] and not lock["stale"]:
+            raise BrowserError("PROFILE_LOCKED", "다른 프로세스가 이 프로필을 사용 중입니다.", profile=name,
+                               holder_pid=lock.get("holder_pid"), fix=sandbox.DOCTOR_CODES["PROFILE_LOCKED"])
+        if lock["removed"]:
+            self.emit("profile_lock_recovered", profile=name, removed=lock["removed"], holder_pid=lock.get("holder_pid"))
+        executable = self.config.executable_path
+        if not executable:
+            try:
+                executable = self.playwright.chromium.executable_path
+            except Exception:
+                executable = None
+        env = {**os.environ, **sandbox.launch_env(executable)}
+        try:
+            context = await self.playwright.chromium.launch_persistent_context(
+                str(profile_dir), headless=self.config.headless,
+                executable_path=self.config.executable_path,
+                chromium_sandbox=not self.config.no_sandbox,
+                viewport=viewport, is_mobile=options.get("mobile", self.config.mobile),
+                has_touch=options.get("mobile", self.config.mobile),
+                device_scale_factor=options.get("device_scale_factor", 1),
+                accept_downloads=True, service_workers="block" if policy == "defer" else "allow",
+                args=["--autoplay-policy=user-gesture-required"], env=env,
+            )
+        except PlaywrightError as error:
+            # 같은 "sandboxing failed" 메시지라도 root 실행과 AppArmor 제한을 구분해 돌려준다.
+            layout = sandbox.chromium_layout(executable) if executable else {"browsers_root": None}
+            raise sandbox.launch_error(str(error), {"is_root": sandbox.is_root(),
+                                                    "apparmor": sandbox.apparmor_status(layout["browsers_root"])}) from error
         self.contexts[name] = context
         self.allowed[name] = set()
         self.policies[name] = policy
+        self.profile_dirs[name] = profile_dir
         context.set_default_timeout(self.config.timeout_ms)
-        await context.add_init_script(script=Path(__file__).with_name("media.js").read_text(encoding="utf-8"))
+        for script in ("media.js", "activity.js"):
+            await context.add_init_script(script=Path(__file__).with_name(script).read_text(encoding="utf-8"))
         await context.route("**/*", lambda route: self._route(name, route))
         context.on("request", lambda request: self._request(name, request))
         context.on("requestfinished", lambda request: self._resource_finish(request, "loaded"))
@@ -213,6 +269,10 @@ class Engine:
                                "purpose": "display" if request.resource_type in {"image", "media", "font"} else "functional"}
         if len(self.resources) > 2000:
             self.resources.popitem(last=False)
+        tab = self.tabs.get(tab_id)
+        if tab:
+            tab.inflight.add(key)
+            tab.last_network = time.monotonic()
 
     async def _route(self, profile: str, route) -> None:
         """선택된 URL만 이미지/미디어를 허용하여 디코딩 전에 네트워크 비용을 줄인다."""
@@ -228,7 +288,12 @@ class Engine:
 
     def _resource_finish(self, request, status: str) -> None:
         """의도적 보류는 네트워크 실패로 덮어쓰지 않고 실제 전송 실패만 보고한다."""
-        record = self.resources.get(self.request_ids.get(request))
+        key = self.request_ids.get(request)
+        record = self.resources.get(key)
+        tab = self.tabs.get(record["tab"]) if record else None
+        if tab:
+            tab.inflight.discard(key)
+            tab.last_network = time.monotonic()
         if record and record["status"] != "deferred":
             record["status"] = status
             if status == "failed":
@@ -329,18 +394,36 @@ class Engine:
         return tab
 
     async def close_profile(self, profile: str) -> dict:
-        """프로필 브라우저만 닫는다. 사용자 저장소와 다운로드 파일은 보존한다."""
+        """프로필 브라우저를 닫고 Chromium 프로세스 종료와 잠금 해제를 확인해 보고한다.
+
+        사용자 저장소와 다운로드 파일은 보존한다. 정상 종료 뒤에도 남은 프로세스는
+        종료 요청/강제 종료하고, 그 수를 응답에 포함한다.
+        """
         context = self.contexts.get(profile)
         if not context:
             raise BrowserError("PROFILE_NOT_FOUND", "열린 프로필이 없습니다.", profile=profile)
-        await context.close()
+        profile_dir = self.profile_dirs.get(profile, self.config.data_dir / "profiles" / profile)
+        before = processes.chromium_processes(profile_dir)
+        try:
+            await context.close()
+        except PlaywrightError:
+            pass  # 이미 충돌/종료된 브라우저는 아래 프로세스 정리로 마무리한다.
         self.contexts.pop(profile, None)
         self.allowed.pop(profile, None)
         self.policies.pop(profile, None)
-        return {"closed": profile}
+        self.profile_dirs.pop(profile, None)
+        remaining = await processes.wait_for_exit(profile_dir, timeout=3)
+        forced = processes.terminate([p["pid"] for p in remaining]) if remaining else None
+        lock = processes.release_stale_lock(profile_dir)
+        still = processes.chromium_processes(profile_dir)
+        return {"closed": profile, "processes": {"before": len(before), "exited": len(before) - len(remaining),
+                                                 "forced": forced["terminated"] if forced else 0,
+                                                 "remaining": [p["pid"] for p in still]},
+                "lock": {"released": not lock["present"] or bool(lock["removed"]), "path": lock["path"],
+                         "removed": lock["removed"], "remaining": lock["present"] and not lock["removed"]}}
 
-    async def close(self) -> None:
-        """진행 중인 다운로드에 짧은 완료 기회를 준 뒤 모든 엔진 자원을 해제한다."""
+    async def close(self) -> dict:
+        """진행 중인 다운로드에 짧은 완료 기회를 준 뒤 모든 엔진 자원을 해제하고 정리 결과를 돌려준다."""
         self.closing = True
         if self.tasks:
             _, pending = await asyncio.wait(self.tasks, timeout=5)
@@ -348,8 +431,19 @@ class Engine:
                 task.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
+        reports = []
         for name in list(self.contexts):
-            await self.close_profile(name)
+            reports.append(await self.close_profile(name))
         if self.playwright:
             await self.playwright.stop()
             self.playwright = None
+        remaining = [pid for report in reports for pid in report["processes"]["remaining"]]
+        self.close_report = {
+            "closed": True, "profiles": reports,
+            "processes": {"terminated": sum(r["processes"]["exited"] + r["processes"]["forced"] for r in reports),
+                          "forced": sum(r["processes"]["forced"] for r in reports), "remaining": len(remaining),
+                          "remaining_pids": remaining},
+            "locks": {"released": all(r["lock"]["released"] for r in reports),
+                      "remaining": [r["closed"] for r in reports if r["lock"]["remaining"]]},
+        }
+        return self.close_report

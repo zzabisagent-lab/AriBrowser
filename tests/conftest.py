@@ -2,6 +2,7 @@
 
 import io
 import threading
+import time
 from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -56,6 +57,40 @@ document.querySelector('canvas').getContext('2d').fillRect(0,0,40,30);
 </script></html>"""
 
 
+# 상품 검색 결과 페이지: 반복 레코드, 정렬 select/탭, 필터 토글, 페이지네이션, 전체 건수,
+# 비동기 재정렬(SPA)과 아무 일도 하지 않는 버튼을 제공해 추출/상태/검증 기능을 검사한다.
+PRODUCTS = """<!doctype html><html lang="ko"><meta charset="utf-8"><title>상품 검색</title>
+<style>body{font:14px sans-serif} .prod{margin:4px;padding:4px;border:1px solid #ccc} .sort-tabs li.on a{font-weight:bold}
+.pagination a[aria-current]{font-weight:bold}</style>
+<header><nav><ul><li><a href="/">홈</a></li><li><a href="/products">상품</a></li><li><a href="/other">기타</a></li></ul></nav></header>
+<main><h1>검색 결과</h1><p class="total">전체 (123)</p>
+<form class="sort-form"><label>정렬 <select id="sort" name="sort"><option value="popular">인기순</option><option value="low">낮은가격순</option><option value="high">높은가격순</option></select></label>
+<label>표시 <select id="per"><option>30개씩</option><option selected>60개씩</option><option>120개씩</option></select></label>
+<label><input type="checkbox" id="ship" checked> 배송비 포함</label><label><input type="checkbox" id="free"> 무료배송만</label></form>
+<ul class="sort-tabs"><li class="on"><a href="?sort=popular">인기순</a></li><li><a href="?sort=low">낮은가격순</a></li><li><a href="?sort=high">높은가격순</a></li></ul>
+<ul id="products">
+<li class="prod"><a class="name" href="/item/1">아크릴 보드 A</a> <span class="price">35,000원</span> <span class="ship">배송비 3,000원</span> <span class="seller">판매처 가</span><img src="/one.png" alt="A"></li>
+<li class="prod"><a class="name" href="/item/2">아크릴 보드 B</a> <span class="price">15,580원</span> <span class="ship">무료배송</span> <span class="seller">판매처 나</span><img src="/two.png" alt="B"></li>
+<li class="prod"><a class="name" href="/item/3">아크릴 보드 C</a> <span class="price">22,900원</span> <span class="ship">배송비 2,500원</span> <span class="seller">판매처 다</span></li>
+<li class="prod"><a class="name" href="/item/4">아크릴 보드 D</a> <span class="price">99,000원</span> <span class="seller">판매처 라</span></li>
+<li class="prod"><a class="name" href="/item/2">아크릴 보드 B</a> <span class="price">15,580원</span> <span class="ship">무료배송</span> <span class="seller">판매처 나</span></li>
+<li class="prod"><a class="name" href="/item/5">아크릴 보드 E</a> <span class="price">48,000원</span> <span class="seller">판매처 마</span></li>
+<li class="prod"><a class="name" href="/item/6">아크릴 물감 세트 120ml</a> <span>6,200원</span> <span class="seller">판매처 바</span></li>
+</ul>
+<nav class="pagination" aria-label="페이지"><a href="?page=1" aria-current="page">1</a> <a href="?page=2">2</a> <a href="?page=3">3</a> <a href="?page=2" rel="next">다음</a></nav>
+<button id="noop">정렬 적용</button> <button id="async-sort">낮은가격순 비동기</button> <div id="status" role="status"></div></main>
+<script>
+document.querySelector('#async-sort').onclick = () => setTimeout(() => fetch('/api/slow').then(r => r.json()).then(() => {
+  const list = document.querySelector('#products');
+  const priceOf = li => parseInt((li.querySelector('.price') || li.querySelector('span')).textContent.replace(/,/g, ''));
+  [...list.children].sort((a, b) => priceOf(a) - priceOf(b)).forEach(li => list.appendChild(li));
+  document.querySelector('#sort').value = 'low';
+  document.querySelector('#status').textContent = '낮은가격순 적용';
+  history.pushState(null, '', '?sort=low&page=1');
+}), 200);
+</script></html>"""
+
+
 @pytest.fixture(scope="session")
 def site():
     """파일·오류·리디렉션·교차 출처 프레임을 제공하며 자원별 실제 요청 횟수를 센다."""
@@ -72,6 +107,12 @@ def site():
             status, content_type, extra = 200, "text/html; charset=utf-8", {}
             if self.path == "/":
                 body = HTML.replace("PORT", str(self.server.server_port)).encode()
+            elif self.path.startswith("/products"):
+                body = PRODUCTS.encode()
+            elif self.path == "/api/slow":
+                # SPA 비동기 로딩을 흉내 내는 느린 JSON 응답.
+                time.sleep(0.4)
+                content_type, body = "application/json", b'{"ok":true}'
             elif self.path == "/frame":
                 body = '<label>프레임 입력<input></label><button>프레임 버튼</button>'.encode()
             elif self.path == "/other":
@@ -131,4 +172,4 @@ async def find_id(protocol, role: str | None = None, text: str = "", **params) -
     """검색 결과에서 정확한 이름을 우선해 테스트가 잘못된 부모 요소를 조작하지 않게 한다."""
     result = await command(protocol, "find", role=role, text=text, **params)
     assert result["elements"], (role, text)
-    return next((e["id"] for e in result["elements"] if e["name"] == text), result["elements"][0]["id"])
+    return next((e["id"] for e in result["elements"] if e.get("name", "") == text), result["elements"][0]["id"])
