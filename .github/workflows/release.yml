@@ -112,7 +112,8 @@ jobs:
         # 각 하위 명령의 출력을 GitHub 주석(::notice/::error)으로 남겨 작업 로그 권한 없이도 실패 원인을 볼 수 있게 한다.
         # 이 작업은 소스를 pip로 설치하므로 PATH의 `aribrowser`는 소스 콘솔 스크립트다. 패키지 바이너리는 /usr/bin/aribrowser로 부른다.
         run: |
-          run() { local name="$1"; shift; local out rc; if out=$("$@" 2>&1); then echo "::notice::$name ok: $(echo "$out" | tr '\n' ' ' | cut -c1-1500)"; else rc=$?; echo "::error::$name failed (exit $rc): $(echo "$out" | tr '\n' ' ' | cut -c1-2000)"; exit $rc; fi; }
+          # GitHub는 단계당 주석을 10개로 제한하므로 성공 출력은 모아서 마지막에 한 번만 남기고, 실패 시 지금까지의 출력을 함께 남긴다.
+          log=""; run() { local name="$1"; shift; local out rc; if out=$("$@" 2>&1); then log="$log [$name] $(echo "$out" | tr '\n' ' ' | cut -c1-700)"; else rc=$?; echo "::error::$name failed (exit $rc): $(echo "$out" | tr '\n' ' ' | cut -c1-2500)"; echo "::notice::outputs before failure: $(echo "$log" | cut -c1-6000)"; exit $rc; fi; }
           run "uninstall previous sandbox" sudo -E env "PATH=$PATH" python -m aribrowser --uninstall-sandbox
           run "helper absent before deb" test ! -e /usr/local/lib/aribrowser/chrome-sandbox
           run "artifacts" ls -la artifacts
@@ -132,6 +133,7 @@ jobs:
           run "apt remove" sudo apt-get remove -y aribrowser
           run "helper removed by prerm" test ! -e /usr/local/lib/aribrowser/chrome-sandbox
           run "bundle removed" test ! -e /opt/aribrowser/aribrowser
+          echo "::notice::deb verification outputs: $(echo "$log" | cut -c1-6000)"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

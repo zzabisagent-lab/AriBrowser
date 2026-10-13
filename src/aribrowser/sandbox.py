@@ -230,7 +230,9 @@ def helper_status(path: Path) -> dict:
         return {"installed": False, "path": str(path), "exists": False}
     stat = path.stat()
     setuid = bool(stat.st_mode & 0o4000)
-    valid = stat.st_uid == 0 and setuid and (stat.st_mode & 0o777) == 0o755
+    # Chromium과 같은 기준: root 소유, setuid, 모두 실행 가능, 그룹/기타 쓰기 불가. 정확히 0755가 아니어도(ACL 마스크 등) 유효하다.
+    mode = stat.st_mode & 0o777
+    valid = stat.st_uid == 0 and setuid and (mode & 0o005) == 0o005 and (mode & 0o022) == 0
     return {"installed": valid, "path": str(path), "exists": True, "owner_uid": stat.st_uid,
             "mode": oct(stat.st_mode & 0o7777), "setuid": setuid, "size": stat.st_size}
 
