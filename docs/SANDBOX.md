@@ -9,6 +9,17 @@ FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:129 No usable sandbo
 
 같은 메시지는 root 사용자로 실행했을 때도 나옵니다. `--doctor`가 두 경우를 구분합니다.
 
+## 0.3.0: Debian/Ubuntu 패키지로 설치
+
+```bash
+sudo apt install ./aribrowser_0.3.0_amd64.deb
+aribrowser --self-test            # 샌드박스가 켜진 번들 Chromium으로 통과
+aribrowser --doctor               # sandbox.sandbox_source = setuid_helper
+sudo apt remove aribrowser        # AriBrowser가 설치한 도우미/정책만 제거
+```
+
+패키지는 `/opt/aribrowser`에 번들을 두고 `/usr/bin/aribrowser` 링크를 만듭니다. `postinst`가 공용 setuid 도우미(아래 표의 기본 방법)를 설치하므로 압축 해제 뒤 따로 `--install-sandbox`를 실행할 필요가 없고, 전역 AppArmor/sysctl 설정은 바꾸지 않습니다. 업그레이드 시에는 도우미를 유지하며(`prerm`은 remove/purge에서만 제거) 설치 경로가 바뀌어도 도우미가 경로·리비전과 무관하므로 설정이 유지됩니다. tarball 배포는 아래처럼 한 번 설치합니다.
+
 ## 0.2.0: 호스트당 한 번만 설치
 
 0.1.0의 AppArmor 정책은 설치 디렉터리 경로에 붙어 있어 AriBrowser를 새 경로에 풀 때마다 다시 설치해야 했습니다. 0.2.0은 세 가지 경로 독립 방법을 제공하며 어느 것이든 **한 번** 하면 그 호스트의 모든 AriBrowser 설치(경로·Chromium 리비전·사용자 무관)에 적용됩니다.
@@ -76,6 +87,10 @@ Chromium 디렉터리 안에 `chrome-sandbox`를 설치합니다. 설치 디렉�
 | `BROWSER_LAUNCH_FAILED` | 분류되지 않은 실행 실패 | doctor 출력의 `log` 확인 |
 
 `--doctor`는 위 코드를 `checks[].code`와 `summary.error_code`로 돌려주고, 세션 중 프로필 실행 실패(`navigate`/`profile.create`)도 같은 코드와 `details.fix`로 보고합니다. 실제 실행이 성공한 경우(도우미, 시스템 브라우저) 정적 AppArmor 판정의 실패는 `info`로 낮춥니다.
+
+## 응답에서 확인하는 실행 엔진(`runtime`)
+
+0.3.0부터 첫 `profile.create`/`navigate` 응답과 `capabilities.runtime`에 실제 제품/버전(CDP `Browser.getVersion`), 프로세스 기준 실행 파일(`/proc/<pid>/exe`), 대체 사유(`fallback_from`), `sandbox_active`/`sandbox_source`/`sandbox_evidence.seccomp_filtered`가 담깁니다. 벤치마크의 엔진 동등성 검증에 별도 `--doctor` 실행이 필요 없습니다.
 
 ## 샌드박스 활성 근거
 

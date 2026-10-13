@@ -195,6 +195,8 @@ def test_readiness_classification_rules():
     assert classify(base, policy, 200)["status"] == "ready"
     assert classify({**base, "nodes": 500, "headings": 0}, policy, 200)["status"] == "loading"
     assert classify({**base, "title": "Access Denied"}, policy, 200)["status"] == "blocked"
+    # Amazon의 AI Agent 접근 거부 안내 페이지(제목 "Amazon.com", 본문 한 문장 + Continue 버튼)는 차단으로 본다(v0.3.0).
+    assert classify({**base, "title": "Amazon.com", "sample": "Continued access by an unauthorized AI agent violates Amazon's Conditions of Use. Continue"}, policy, 200) == {"status": "blocked", "reasons": ["blocked_text"], "kind": "other"}
     assert classify({**base, "text_chars": 50000, "content_text_chars": 50000, "title": "Access Denied"}, policy, 200)["status"] == "ready"
     assert classify({**base, "links": 30, "nodes": 800, "headings": 0}, policy, 200)["status"] == "ready"
     assert classify({**base, "error_page": True}, policy, None)["status"] == "error"

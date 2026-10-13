@@ -21,7 +21,7 @@ def test_cli_jsonl_recovers_and_closes(tmp_path):
     assert len(responses) == 4
     assert responses[0]["error"]["code"] == "INVALID_JSON"
     assert responses[1]["error"]["code"] == "UNKNOWN_COMMAND"
-    assert responses[2]["id"] == 3 and responses[2]["result"]["version"] == "0.2.0"
+    assert responses[2]["id"] == 3 and responses[2]["result"]["version"] == "0.3.0"
     assert responses[3]["id"] == 4 and responses[3]["result"]["closed"] and responses[3]["result"]["processes"]["remaining"] == 0
 
 
@@ -29,7 +29,7 @@ def test_cli_doctor_and_cleanup(tmp_path):
     """--doctor는 단계별 검사 JSON을, --cleanup은 정리 결과 JSON을 출력한다."""
     result = run_cli("--doctor", "--no-launch", "--no-sandbox", tmp_path=tmp_path)
     report = json.loads(result.stdout)
-    assert report["aribrowser"] == "0.2.0" and report["chromium"]["chromium"]
+    assert report["aribrowser"] == "0.3.0" and report["chromium"]["chromium"]
     assert {c["id"] for c in report["checks"]} >= {"user", "display", "chromium"}
     assert "sandbox" not in report  # --no-launch는 실제 실행 검사를 생략한다.
     cleanup = run_cli("--cleanup", tmp_path=tmp_path)

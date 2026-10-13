@@ -15,6 +15,10 @@ v0.2.0 추가 옵션:
 - `--sandbox-method auto|helper|apparmor|suid`: 기본 `auto`(=helper)는 공용 setuid 도우미를
   고정 경로에 한 번 설치해 설치 경로와 무관하게 동작한다. `apparmor`는 모든 사용자 캐시와
   배포 디렉터리 구조에 붙는 정책을 설치한다. `suid`는 v0.1.0 방식(설치 디렉터리 안)이다.
+
+v0.3.0 추가 옵션:
+- `--locale`, `--timezone`: 프로필 생성 시 명시하지 않았을 때 쓰는 세션 기본 로캘(BCP 47)과 시간대(IANA).
+  `profile.create`의 `locale`/`timezone_id`가 우선하며, 프로필에 저장된 값이 그다음이다.
 """
 
 import argparse
@@ -27,7 +31,8 @@ from pathlib import Path
 
 from . import __version__, processes, sandbox
 from .browser import Browser
-from .engine import Config
+from .engine import Config, validate_locale, validate_timezone
+from .errors import BrowserError
 from .protocol import Protocol
 
 
@@ -47,6 +52,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--browser", choices=["auto", "bundled", "system"], default="auto",
                         help="auto: 번들 Chromium, 샌드박스 불가 시 시스템 Chrome/Chromium/Edge/Brave로 대체. bundled/system: 해당 브라우저만.")
     result.add_argument("--max-bytes", type=int, default=500_000, help="관측 응답의 기본 바이트 상한(0=무제한, 요청별 max_bytes로 재지정)")
+    result.add_argument("--locale", help="프로필 기본 로캘(BCP 47, 예: en-US). Accept-Language와 navigator.language에 적용됩니다.")
+    result.add_argument("--timezone", help="프로필 기본 시간대(IANA, 예: UTC, Asia/Seoul).")
     result.add_argument("--snapshot", metavar="URL", help="URL을 읽고 전체 화면을 출력한 뒤 종료합니다.")
     result.add_argument("--format", choices=["json", "text"], default="json")
     result.add_argument("--self-test", action="store_true", help="번들 Chromium과 DOM/접근성 연결을 검증합니다.")
@@ -75,7 +82,7 @@ def config_from(args) -> Config:
     return Config(data_dir=args.data_dir, headless=not args.headed, no_sandbox=args.no_sandbox,
                   width=args.width, height=args.height, mobile=args.mobile,
                   timeout_ms=args.timeout_ms, media_policy=args.media, executable_path=args.chromium,
-                  max_bytes=args.max_bytes, browser=args.browser)
+                  max_bytes=args.max_bytes, browser=args.browser, locale=args.locale, timezone_id=args.timezone)
 
 
 async def run_doctor(args) -> int:
@@ -226,6 +233,11 @@ def main() -> None:
         parser().error("--timeout-ms는 1~30000입니다.")
     if args.max_bytes < 0:
         parser().error("--max-bytes는 0 이상입니다.")
+    try:
+        args.locale = validate_locale(args.locale)
+        args.timezone = validate_timezone(args.timezone)
+    except BrowserError as error:
+        parser().error(f"{error} ({error.details})")
     try:
         if args.cleanup:
             print(encode(processes.cleanup(args.data_dir)), flush=True)

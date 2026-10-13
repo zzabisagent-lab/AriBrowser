@@ -7,6 +7,11 @@ PyInstaller는 교차 컴파일러가 아니므로 각 OS의 네이티브 CI에�
 실행을 검증한다. 호스트가 샌드박스를 지원하지 않을 때(Ubuntu 24.04의 AppArmor
 userns 제한, root 실행 등)만 `--no-sandbox`로 다시 검증하고 그 사실을 출력한다.
 런타임에서는 어떤 경우에도 `--no-sandbox`를 자동으로 켜지 않는다.
+
+v0.3.0: Linux에서 dpkg-deb가 있으면 같은 번들로 Debian 패키지(.deb)도 만든다(scripts/build_deb.py).
+설치 시 샌드박스 도우미를 함께 설치해 Ubuntu 24.04에서 압축 해제만으로는 안 되던 번들 Chromium
+샌드박스 실행을 패키지 설치만으로 끝낸다. tzdata 패키지의 시간대 데이터를 함께 묶어 Windows에서도
+`timezone_id` 검증이 동작하게 한다.
 """
 
 import hashlib
@@ -60,7 +65,7 @@ def main() -> None:
     subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], env=env, check=True)
     subprocess.run([
         sys.executable, "-m", "PyInstaller", "--clean", "--noconfirm", "--onedir", "--noupx",
-        "--name", "aribrowser", "--collect-data", "aribrowser",
+        "--name", "aribrowser", "--collect-data", "aribrowser", "--collect-data", "tzdata",
         "--additional-hooks-dir", "scripts/hooks", "src/aribrowser/__main__.py",
     ], env=env, check=True)
     bundle = root / "dist" / "aribrowser"
@@ -95,6 +100,10 @@ def main() -> None:
             digest.update(chunk)
     archive.with_name(archive.name + ".sha256").write_text(f"{digest.hexdigest()}  {archive.name}\n", encoding="utf-8")
     print(f"Built and verified: {archive.name} ({archive.stat().st_size:,} bytes)")
+    if system == "linux" and shutil.which("dpkg-deb"):
+        from build_deb import build as build_deb
+
+        build_deb(bundle, artifacts)
 
 
 if __name__ == "__main__":

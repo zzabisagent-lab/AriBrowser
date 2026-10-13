@@ -32,7 +32,7 @@ STATUSES = {"ready", "loading", "empty", "blocked", "login_required", "http_erro
 BLOCKED_TEXT = re.compile(
     r"access denied|forbidden|just a moment|verify you are human|are you a robot|robot check|unusual traffic|"
     r"automated (?:access|queries|requests)|too many requests|rate limit|security check|please verify|"
-    r"bot detection|attention required|checking your browser|"
+    r"bot detection|attention required|checking your browser|unauthorized (?:ai |automated )?agent|"
     r"비정상적인 접근|자동 입력 방지|보안 문자|자동화된 요청|접근이 차단|비정상 접근|일시적으로 차단|"
     r"사람인지 확인|로봇이 아닙니다|과도한 요청", re.IGNORECASE)
 # 로딩 품질 상태별 Agent 안내.
@@ -97,6 +97,9 @@ def page_kind(signals: dict) -> str:
     if product_url and signals.get("prices", 0) >= 1 and signals.get("h1"):
         return "product"
     if signals.get("repeated_groups", 0) >= 3 and signals.get("prices", 0) >= 3:
+        return "listing"
+    # 반복 그룹이 하나뿐이어도 항목이 많고 가격이 여럿이면 목록이다(Amazon 결과처럼 카드 컨테이너가 하나인 구조, v0.3.0).
+    if signals.get("repeated_max", 0) >= 8 and signals.get("prices", 0) >= 3:
         return "listing"
     if signals.get("prices", 0) >= 1 and signals.get("h1") and signals.get("repeated_groups", 0) < 6:
         return "product"
@@ -225,5 +228,5 @@ async def assess(browser, tab, policy: dict, http_status: int | None) -> dict:
     return {**verdict, "waited_ms": int((time.monotonic() - started) * 1000), "checks": checks,
             "signals": {key: signals.get(key) for key in ("text_chars", "content_text_chars", "nodes", "links", "content_links", "images", "headings",
                                                            "h1", "inputs", "password_inputs", "skeletons", "spinners",
-                                                           "app_root", "captcha", "repeated_groups", "prices", "sample")},
+                                                           "app_root", "captcha", "repeated_groups", "repeated_max", "prices", "sample")},
             "probe": probe}

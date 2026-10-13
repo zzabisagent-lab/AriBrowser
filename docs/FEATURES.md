@@ -1,4 +1,4 @@
-# v0.2.0 기능과 경계
+# v0.3.0 기능과 경계
 
 | 요구 영역 | 구현 |
 | --- | --- |
@@ -16,7 +16,8 @@
 | 파일 | input 업로드, 첨부 파일 다운로드 자동 보관, 완료/실패 조회 |
 | 운영 | 실행 환경 진단(`--doctor`), 공용 setuid 도우미/경로 독립 AppArmor 정책 설치·검증, 시스템 브라우저 자동 대체, 프로세스/잠금 정리 보고, 잔여 세션 정리 |
 | 로딩 품질 | 탐색 후 빈 껍데기/차단/로그인/HTTP 오류 판정, 늦은 SPA 렌더 대기, 자동 재시도, 근거와 다음 조치 안내 |
-| 상품 추출 | 붙은 텍스트 경계 규칙, 가격·원가·할인·판매량·평점·리뷰·배송 자동 필드, 상세 페이지 요약(JSON-LD/메타/DOM), 품질 지표 |
+| 상품 추출 | 붙은 텍스트 경계 규칙, 가격·원가·할인·판매량·최근 구매량·평점(한국어 최댓값 우선 표현 포함)·리뷰·배송 자동 필드, 상세 페이지 요약(JSON-LD/메타/DOM), canonical URL/안정 식별자, null 키에 안전한 중복 제거와 품질 경고, explain 모드 |
+| 재현성 | 프로필 로캘/시간대 고정과 저장, 실제 실행 엔진 정보(`runtime`), minimal 탐색, Linux `.deb` 패키지(설치 시 샌드박스 도우미) |
 | 상태와 오류 | HTTP/네트워크/인증/요소/다운로드/팝업/충돌/응답 제한 시간/기대 미달/샌드박스·권한·의존성 실패를 분리 |
 
 ## 요구사항별 구현 요약 (P0~P2)
@@ -51,6 +52,23 @@
 | (Chrome 단점) 사이트별 선택자·정규화 코드 | 자동 감지 레코드 + 확장 자동 필드 + 상세 요약(JSON-LD/메타/DOM) | 감지 실패 시 `item`/`fields`/`query`로 보완 |
 | (Chrome 단점) 붙은 가격·판매량 텍스트 후처리 | textlib 경계 규칙, 통화/수량/평점/리뷰/할인 해석기 공용화 | 해석기는 한국어/영어 표기 중심 |
 
+## v0.3.0 개선 요약 (Amazon Agent 벤치마크 후속 요구사항 기준)
+
+| 번호 | 지적 사항 | 구현 | 경계 |
+| --- | --- | --- | --- |
+| P0-1 | 프로필 로캘/시간대를 고정할 수 없음 | `profile.create.locale/timezone_id` → Accept-Language·navigator.language·Intl 시간대, 프로필에 저장, `profile.list`/`capabilities.profiles`, CLI `--locale`/`--timezone` | 사이트가 IP 기반으로 지역을 정하면 언어 선호만 전달된다. 통화는 사이트 설정에 따른다 |
+| P0-2 | `별 5개 중 4.3개`를 평점으로 못 읽음 | 최댓값 우선 표현 해석(`별 5개 중 N개`, `5점 만점에 N점`, `5개 중 N.N`) | "5개 중 3개"처럼 소수가 없고 별/만점 키워드도 없는 표현은 재고 문구로 보고 제외 |
+| P0-3 | null dedupe 키가 레코드를 1개로 축소 | 키가 모두 비어 있는 레코드 보존, `dedupe{usable_records, skipped_records, key_coverage, warning}` | 복합 키는 유효 조합으로 비교하므로 일부 키만 있는 레코드끼리는 그 조합이 같으면 중복 |
+| P0-4 | quality가 결과 손실을 경고하지 않음 | `source_records`/`output_records`/`deduplicated`/`duplicate_ratio`/`dedupe_key_coverage`/`missing`/`warnings`, 이상 시 `high` 금지 | 임계치(제거율 50%, 커버리지 50%)는 고정값 |
+| P1-1 | 레코드 자체를 읽는 명시적 selector 없음 | `source: "self"`, `":self"`, `":scope"` 호환, 선택자 전부 실패 시 self/relation/explain 안내 hint | — |
+| P1-2 | 최근 월 구매량과 누적 판매량 미구분 | `recent_sales{raw, value, plus, period}`, `sold`에서 기간 표현 제외, `query.fields`/`page.product` 지원 | 한국어/영어 표현 중심(지난달/최근 한 달간/월/bought in past month 등) |
+| P1-3 | 구조화 include 전용 최소 탐색 없음 | `navigate(mode="minimal")`: 관측/요약 생략, page/readiness/verification/include/errors/runtime/budget | 변경분 기준선을 비우므로 minimal 직후 `snapshot(mode=changes)`는 전체를 새 기준선으로 본다 |
+| P1-4 | 부모 링크 탐색이 어려움 | `relation: "closest"`+`closest`, `type: "url"` 자동 탐색(self→closest→inner)과 `sources` | 관계 탐색은 레코드 경계 안에서만 |
+| P1-5 | canonical URL/안정 식별자가 Agent 책임 | `canonical: true` → `{raw, canonical, stable_id, removed}`, `stable_id` 정규식, 알려진 추적 키만 제거, `page.product.canonical_url` | 목록에 없는 쿼리는 보존(보수적). 사이트 고유 ID 패턴은 정규식으로 지정 |
+| P2-1 | 실제 실행 엔진을 응답에서 확인 어려움 | 첫 응답 `runtime`(CDP 제품/버전, `/proc/<pid>/exe`, 대체 사유, 샌드박스 상태/근거), 이후 `runtime_id` | Windows/macOS는 프로세스 실행 파일을 launch 경로로 보고 |
+| P2-2 | Linux tarball의 샌드박스 설치 경험 | `.deb` 패키지(postinst 도우미 설치, prerm 제거), 업그레이드 시 유지, CI 검증 | Debian/Ubuntu 계열만. tarball은 기존처럼 `--install-sandbox` 1회 |
+| P2-3 | 파싱 실패 원인과 원문을 보기 어려움 | `explain=true`(selector_matches/raw/parse_status), 세분화한 `missing` 사유, `quality.missing` 집계 | raw는 200자, 비밀번호 값은 가림 |
+
 ## Chromium과 관측 범위
 
 교차 출처 iframe은 각각의 Playwright 프레임에서 수집·조작합니다. open Shadow DOM을 순회하며 closed Shadow DOM 내부 노드는 현재 직접 ID 조작 대상으로 노출하지 않습니다. 브라우저 보안·인증·자동화 차단 정책을 우회하지 않습니다. CAPTCHA 해결, 확장 프로그램 UI, DRM 영상 재생은 구현 범위에 포함하지 않습니다.
@@ -73,6 +91,6 @@ Canvas/WebGL/영상/SVG와 이름상 차트·지도는 `needs_visual`로 시각 
 
 ## 검증과 배포
 
-실제 로컬 HTTP 사이트를 사용하는 통합 테스트가 의미/ID/변경분, 상태/폼, Shadow DOM/교차 출처 iframe, 스크롤/가상 목록, 모달/대화상자/팝업, 포인터/파일, 이미지 보류/렌더, HTTP 오류/방문 기록, 프로필 격리/복원, 잘못된 요청 복구와 P0~P2 요구사항(요약 탐색, 형식/예산, 레코드 추출, 조작 검증, 페이지 상태, 내부 질의, 검색 최적화/문맥, SPA 대기, 짧은 ID, 예산 보고, 프로세스/잠금 정리, 진단), 그리고 v0.2.0 항목(경로 독립 정책/브라우저 정책/대체 실행, 활동 집계, 로딩 품질 판정과 재시도, include/batch, 텍스트 경계와 자동 필드, 상품 상세 요약)을 검증합니다. 네이티브 빌드에 포함된 Chromium을 `--self-test`/`--doctor`로 다시 실행합니다. Ubuntu 24.04의 AppArmor userns 제한 환경에서 `--install-sandbox` 후 샌드박스가 켜진 실행을 검증했습니다. CI 결과는 [Actions](https://github.com/zzabisagent-lab/AriBrowser/actions)에서 확인할 수 있습니다.
+실제 로컬 HTTP 사이트를 사용하는 통합 테스트가 의미/ID/변경분, 상태/폼, Shadow DOM/교차 출처 iframe, 스크롤/가상 목록, 모달/대화상자/팝업, 포인터/파일, 이미지 보류/렌더, HTTP 오류/방문 기록, 프로필 격리/복원, 잘못된 요청 복구와 P0~P2 요구사항(요약 탐색, 형식/예산, 레코드 추출, 조작 검증, 페이지 상태, 내부 질의, 검색 최적화/문맥, SPA 대기, 짧은 ID, 예산 보고, 프로세스/잠금 정리, 진단), v0.2.0 항목(경로 독립 정책/브라우저 정책/대체 실행, 활동 집계, 로딩 품질 판정과 재시도, include/batch, 텍스트 경계와 자동 필드, 상품 상세 요약), v0.3.0 항목(로캘/시간대 적용과 저장, 한국어 평점·최근 구매량, null 키 중복 제거와 품질 경고, self/closest/canonical 필드, explain, minimal 탐색, runtime)을 검증합니다. Ubuntu 24.04 작업은 `.deb` 설치 → 샌드박스 자체 검사 → 제거까지 검증합니다. 네이티브 빌드에 포함된 Chromium을 `--self-test`/`--doctor`로 다시 실행합니다. Ubuntu 24.04의 AppArmor userns 제한 환경에서 `--install-sandbox` 후 샌드박스가 켜진 실행을 검증했습니다. CI 결과는 [Actions](https://github.com/zzabisagent-lab/AriBrowser/actions)에서 확인할 수 있습니다.
 
 배포 바이너리에는 Chromium·Playwright·Python 런타임이 포함되어 크기가 큽니다. Linux 시스템 공유 라이브러리와 선택적 Tesseract는 번들에 포함하지 않습니다. macOS/Windows 상용 배포 서명 자격 증명은 사용하지 않습니다.

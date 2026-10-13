@@ -1,5 +1,51 @@
 # 버전 이력
 
+## 0.3.0 — 2026-10-14
+
+Amazon 상품 검색 동시 벤치마크(`docs/benchmarks/2026-10-13-amazon-guitar-headphone-amp-aribrowser-vs-chrome.md`: AriBrowser 0.2.0 대 Chrome 146, 96개 ASIN·상위 10개 순위 완전 일치)에서 드러난 **정확성·로캘·구조화 추출·토큰 효율** 문제를 고친 릴리스입니다. 요구사항 문서의 v0.2.1 긴급 수정(null 중복 키, 한국어 평점, 레코드 자체 필드, 최근 월 구매량, 품질 경고)과 v0.3.0 기능(프로필 로캘/시간대, minimal 탐색, 관계 기반 URL, explain 모드, 실제 실행 엔진 정보)을 모두 포함하고, 후속 항목이던 canonical URL/안정 식별자와 Linux `.deb` 패키지도 넣었습니다. 기존 `query`/`extract`/`summary` 계약은 유지되며 달라진 값은 `docs/PROTOCOL.md`의 "0.3.0에서 달라진 기본 동작"에 정리했습니다. 목표는 변하지 않았습니다: AI Agent가 **더 적은 토큰으로 더 빨리** 웹 검색 목표를 달성하고, 결과 손실을 조용히 넘기지 않는 것입니다.
+
+### 실측 효과
+
+같은 호스트(Ubuntu 24.04, 번들 Chromium 153 + 공용 샌드박스 도우미, `locale=en-US`)에서 Amazon 검색 "electric guitar headphone amp" 결과 1페이지(48개 카드)를 같은 추출 계약(제목, canonical URL, 가격, 평점, 리뷰 수, 최근 월 구매량)으로 읽은 Agent-visible payload입니다. 토큰은 벤치마크와 같은 `o200k_base` 프록시입니다.
+
+| 흐름 | 왕복 | 탐색 응답 오버헤드(레코드·상태 제외) | 전체 payload | 시간 |
+| --- | --- | --- | --- | --- |
+| 0.3.0 `navigate`(summary) + `extract` + `page.state` | 3회 | 5,743바이트 | 35,086바이트 / 10,721토큰 | 4.37초 |
+| 0.3.0 `navigate(mode="minimal", include=["records","state"])` | 1회 | 1,226바이트 (−79%) | 30,650바이트 / 9,409토큰 (−12%) | 3.64초 (−17%) |
+| 같은 계약에 `canonical: true`(raw·removed 포함) | 1회 | 1,227바이트 | 59,259바이트 / 25,285토큰 | 3.64초 |
+
+- 48개 레코드 기준 9,409토큰은 벤치마크의 2페이지 96개 레코드로 환산하면 약 18,800토큰으로, 0.2.0 벤치마크의 45,970토큰 대비 59% 적습니다(벤치마크 Agent의 추출 계약과 완전히 같지는 않으므로 참고치입니다). 레코드 자체가 payload의 대부분이므로 긴 추적 URL은 `canonical: "compact"`로, 카드 전체 텍스트 대신 `{source: "self", type: "recent_sales"}`처럼 해석기 type을 쓰는 것이 가장 큰 절감입니다.
+- 측정 중 Amazon이 2페이지 요청에 "Continued access by an unauthorized AI agent violates Amazon's Conditions of Use" 안내 페이지(제목 `Amazon.com`, Continue 버튼)를 돌려준 경우가 있었습니다. 0.2.0은 이 페이지를 `ready`로 보고하고 `extract`가 0건을 돌려줬지만 0.3.0은 `blocked`(`blocked_text`)로 분류해 `PAGE_BLOCKED` 오류를 돌려줍니다. AriBrowser는 이런 안내를 우회하거나 버튼을 자동으로 누르지 않습니다.
+- 로컬 테스트 사이트의 Amazon형 페이지(카드 12개)에서는 minimal 응답의 요약 오버헤드가 summary 모드의 절반 미만입니다(`tests/test_v030.py`). 같은 페이지를 0.2.0 바이너리로 읽으면 `{selector: ":scope"}`가 null, `별 5개 중 4.3개`가 null, `5점 만점에 4.0점`은 5로 잘못 해석됐고, 0.3.0은 각각 카드 전체 텍스트, 4.3, 4.0을 돌려줍니다.
+
+### P0 — 결과 정확성과 재현성
+
+- **프로필 로캘·시간대 고정(P0-1)**: `profile.create`에 `locale`(BCP 47)과 `timezone_id`(IANA)를 추가했습니다. Playwright 영구 컨텍스트에 연결되어 `Accept-Language`, `navigator.language`, `Intl` 시간대가 실행 환경이 아니라 프로필 설정을 따릅니다. 적용값은 `profile.create.settings`, `profile.list`, `capabilities.profiles`에 돌려주고 프로필 디렉터리의 `aribrowser-profile.json`에 저장해 같은 프로필을 다시 열 때(옵션 생략) 유지합니다. 잘못된 태그/ID는 `INVALID_ARGUMENT`이며 tz 데이터가 없는 호스트를 위해 `tzdata`를 의존성에 넣고 번들에 포함했습니다. CLI `--locale`/`--timezone`으로 세션 기본값을 둘 수 있습니다.
+- **한국어 평점 해석(P0-2)**: `parseRating`이 최댓값이 먼저 나오는 `별 5개 중 4.3개`, `5점 만점에 4.3점`, `5개 중 4.3`을 기존 `4.3 out of 5 stars`, `4.3/5`와 같은 `{raw, value}`로 돌려줍니다. "5개 중 3개 남음" 같은 재고 문구는 소수 평점이 아니면 제외하고, 모델명·치수·가격은 계속 배제합니다. 자동 필드, `query(fields=["rating"])`, `extract(type="rating")`이 같은 해석기를 씁니다.
+- **null 중복 키에 안전한 dedupe(P0-3)**: 지정한 dedupe 키가 모두 null/빈 값인 레코드는 비교 대상에서 빼고 **보존**합니다. 0.2.0에서는 URL 선택자가 틀리면 키가 `[null]`로 같아져 48개 카드가 1개로 줄었습니다. 응답의 `dedupe{keys, usable_records, skipped_records, duplicates_removed, key_coverage, warning}`로 키 커버리지를 알리고, 복합 키는 유효한 조합으로 비교하며, `canonical=true` URL은 안정 식별자(없으면 canonical URL)로 비교해 추적 매개변수만 다른 같은 상품을 하나로 봅니다. `query`의 dedupe도 같은 규칙입니다.
+- **dedupe 전후를 드러내는 quality(P0-4)**: `quality`에 `source_records`, `output_records`, `deduplicated`, `duplicate_ratio`, `dedupe_key_coverage`, `missing{필드: {사유: 수}}`, `warnings`를 추가했습니다. 제거율 50% 이상, 키 커버리지 50% 미만, 핵심 필드가 모든 레코드에서 같은 값, 어떤 레코드에서도 요소를 못 찾은 필드는 경고를 남기고 `high`를 돌려주지 않습니다.
+
+### P1 — Agent 효율과 API 사용성
+
+- **레코드 자체 필드(P1-1)**: `{source: "self"}`, `{selector: ":self"}`, 호환을 위한 `{selector: ":scope"}`가 카드 전체 표시 텍스트를 읽습니다(0.2.0은 `:scope`가 null이었습니다). 선택자 생략도 그대로 지원합니다.
+- **최근 월 구매량 분리(P1-2)**: 자동 필드 `recent_sales{raw, value, plus, period}`가 `100+ bought in past month`, `지난달 100개 이상 구매`, `최근 한 달간 100개 이상 구매`, `월 100개 이상 판매` 등을 읽고, 누적 `sold`는 이런 기간 표현을 더는 판매량으로 오인하지 않습니다. `query.fields`에 `recent_sales`, `page.product`에도 같은 필드를 추가했습니다. 지정 필드 `type`에 `sold`/`recent_sales`/`reviews`/`discount`/`shipping`을 추가해 `{source: "self", type: "recent_sales"}`처럼 카드 전체 텍스트를 돌려받지 않고 해석 결과만 받을 수 있습니다.
+- **minimal 탐색(P1-3)**: `navigate(mode="minimal")`은 관측(DOM 수집·요약)을 생략하고 `page{url,title,http_status}`, `readiness`(ready가 아닐 때만 signals), `verification`, 요청한 `include` 결과, `errors`(있을 때만), `runtime`, `budget`, `cursor`만 돌려줍니다. 영역/제목/역할 수/검색창/활동 집계는 싣지 않지만 `PAGE_EMPTY`/`PAGE_BLOCKED` 판정과 HTTP 오류 보고는 그대로입니다. 관측을 건너뛰므로 시간도 줄어듭니다.
+- **관계 기반 URL 필드(P1-4)**: `{selector: "h2", type: "url", relation: "closest", closest: "a[href]"}`가 제목을 감싸는 링크를 읽고, `type: "url"`에서 선택 요소에 href가 없으면 자기 href → 레코드 안의 가장 가까운 `a[href]` → 내부 첫 `a[href]` 순으로 자동 탐색해 출처를 `record.sources`(`closest_link`/`inner_link`)에 남깁니다. 관계 탐색은 레코드 경계를 벗어나면 `relation_no_match`로 null을 돌려주어 다른 카드의 링크를 가져오지 않습니다.
+- **canonical URL과 안정 식별자(P1-5)**: `{type: "url", canonical: true, stable_id?: "정규식"}`이 `{raw, canonical, stable_id, removed}`를, `canonical: "compact"`는 `{canonical, stable_id}`만 돌려줍니다. 알려진 추적 키(`ref`, `utm_*`, `qid`, `sr`, `dib`, `spm`, `algo_pvid`, `pd_rd_*`, `pf_rd_*`, `fbclid`, `gclid` 등)와 Amazon식 `/ref=…` 경로 조각, 프래그먼트만 제거하고 서명·인증용 쿼리는 보존합니다(보수적 기본값). 안정 식별자는 호출자의 정규식(첫 캡처 그룹)을 우선하고 없으면 ASIN(`/dp/<10자>`)·숫자 상품 번호(`/item/<n>`, `pcode=<n>` 등)를 씁니다. `page.product`는 `<link rel="canonical">`을 우선한 `canonical_url`/`stable_id`/`canonical_source`를 돌려줍니다.
+
+### P2 — 배포·진단·개발 경험
+
+- **실행 엔진 정보 `runtime`(P2-1)**: 첫 `profile.create`/`navigate` 응답과 `capabilities.runtime`에 `{runtime_id, kind, product, version, executable, resolved_executable, fallback_from, sandbox_active, sandbox_source, sandbox_evidence, headless, user_agent}`를 돌려줍니다. 버전은 CDP `Browser.getVersion`의 제품 문자열에서, 실행 파일은 Linux에서 브라우저 주 프로세스의 `/proc/<pid>/exe`에서 읽어 launcher 이름으로 추정하지 않습니다. 이후 응답은 `{runtime_id}`만 싣습니다.
+- **Linux `.deb` 패키지(P2-2)**: 빌드가 `aribrowser_0.3.0_amd64.deb`를 함께 만듭니다. `/opt/aribrowser`에 설치하고 `/usr/bin/aribrowser` 링크를 두며, `postinst`가 공용 setuid 샌드박스 도우미를 설치하고 `prerm`(remove/purge)이 AriBrowser가 설치한 도우미·정책만 제거합니다. Ubuntu 24.04에서 전역 AppArmor/sysctl을 바꾸지 않고 번들 Chromium `--self-test`가 샌드박스 상태로 통과하며, 업그레이드해도 설정이 유지됩니다. CI의 Ubuntu 24.04 작업이 설치 → 자체 검사 → `runtime.resolved_executable=/opt/aribrowser/…` 확인 → 제거 후 잔여 없음을 검증합니다. `--no-sandbox` 자동 대체 금지는 그대로입니다.
+- **explain 모드와 누락 사유 세분화(P2-3)**: `extract(explain=true)`가 레코드마다 `explain{필드: {selector_matches, raw(200자), parse_status}}`를 돌려줍니다. `missing` 사유는 `selector_no_match`, `relation_no_match`, `attribute_empty`, `text_empty`, `regex_no_match`, `parse_failed`(숫자 없음), `unsupported_locale_pattern`(숫자는 있지만 해석기가 모르는 표현)으로 나뉘고 `quality.missing`이 필드별로 집계합니다. 기본 응답 크기는 그대로이며 raw에는 비밀번호 값이 가려진 표시 텍스트/속성만 들어갑니다.
+
+### 그 밖의 변경
+
+- `capabilities`에 `runtime`, `profiles`, `profile_settings`, `navigate_modes`, `record_field_spec`, `record_field_types`, `query_fields`, `missing_reasons`를 추가하고 `record_auto_fields`에 `recent_sales`를 넣었습니다. `profile.list`가 적용 설정을 돌려줍니다.
+- 이벤트 `profile_settings_ignored`(손상된 설정 파일 무시)를 추가했습니다.
+- 테스트 사이트에 Amazon 한국어 결과를 본뜬 `/amazon`(링크가 h2를 감싸는 카드, 최댓값 우선 평점, 최근 월 구매 배지, 추적 매개변수 URL, 링크 없는 카드)과 로캘/시간대 확인용 `/echo`를 추가하고 `tests/test_v030.py`에 회귀시험을 넣었습니다.
+- 문서: `docs/PROTOCOL.md`(0.3.0 기본 동작, 필드 명세, dedupe/quality, minimal, runtime), `docs/FEATURES.md`, `docs/SANDBOX.md`(.deb), README를 갱신했습니다.
+
 ## 0.2.0 — 2026-10-13
 
 AI Agent가 **더 적은 토큰으로 더 빨리** 웹 검색 목표를 달성하도록, 실사용 비교(`docs/benchmarks/2026-10-13-aliexpress-aribrowser-vs-chrome.md`: AriBrowser 0.1.0 대 Chrome 직접 제어)에서 드러난 네 가지 문제를 고치고 Chrome 방식의 장점(설치 없이 바로 사용, 선택적 DOM 추출)을 가져온 릴리스입니다. 0.1.0의 장점(JSONL 인터페이스, 상품 카드 자동 탐지, 가격·URL·정렬 상태 기본 제공, 짧은 요소 ID와 예산, 명확한 진단)은 그대로 유지하며, 사이트별 선택자나 가격·판매량 텍스트 후처리 코드를 Agent가 직접 쓰지 않아도 되게 했습니다. 기본 동작이 바뀐 항목은 `docs/PROTOCOL.md`의 "0.2.0에서 달라진 기본 동작"을 참고하세요.

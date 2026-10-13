@@ -16,6 +16,13 @@
  *   ("US $" + "12", "12" + "." + "34", "35" + ",000원")
  * - 그 밖의 경우(숫자+숫자, 숫자+문자, 문자+숫자)는 공백을 넣는다. "₩12,345" + "1,000+"가
  *   "12,3451,000"이라는 잘못된 천 단위 묶음이 되는 것을 막기 위해서다.
+ *
+ * v0.3.0 추가(Amazon 벤치마크 후속):
+ * - parseRating이 최댓값이 먼저 나오는 한국어 표현("별 5개 중 4.3개", "5점 만점에 4.3점", "5개 중 4.3")을 해석한다.
+ * - parseRecentSales가 기간 한정 구매량("100+ bought in past month", "지난달 100개 이상 구매")을
+ *   {raw, value, plus, period}로 돌려주고, parseSold는 이런 기간 표현을 누적 판매량으로 오인하지 않는다.
+ * - canonicalUrl이 추적용 쿼리(ref, utm_ 접두, qid, sr, dib 등)와 Amazon식 `/ref=` 경로 조각만 보수적으로 제거하고
+ *   안정 식별자(ASIN, 숫자 상품 번호 또는 호출자가 준 정규식)를 뽑는다. 서명·인증용 쿼리는 건드리지 않는다.
  */
 (() => {
   const BLOCK = new Set(['ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'BR', 'DD', 'DETAILS', 'DIV', 'DL', 'DT',
@@ -155,8 +162,48 @@
    * 숫자와 키워드가 바로 붙어 있어야 하며 "판매 1위", "구매 전 필독"처럼 순위/안내 문구는 제외한다.
    */
   const NOT_COUNT = /^\s?(?:위|등|%|페이지|번째|개월|일|시간|분|년|월|차|호)/;
-  const parseSold = text => {
+
+  /**
+   * 기간 한정 구매량(최근 월 구매 배지). 누적 판매량과 다른 지표이므로 따로 돌려준다.
+   * 영어: "100+ bought in past month", "2K+ bought last week". 한국어: "지난달 100개 이상 구매",
+   * "최근 한 달간 100개 이상 구매", "월 100개 이상 판매", "지난주 50개 구매".
+   * 그룹: 수량, (한국어) "이상" 여부, 기간 단어. 결과는 {raw, value, plus, period(month|week|day|year)}.
+   */
+  const PERIOD_EN = {month: 'month', months: 'month', week: 'week', weeks: 'week', day: 'day', days: 'day', year: 'year', years: 'year'};
+  const PERIOD_KO = {달: 'month', 월: 'month', 개월: 'month', 주: 'week', 주일: 'week', 일: 'day', 년: 'year', 해: 'year'};
+  const RECENT_PATTERNS = [
+    // 100+ bought in past month / 2K+ bought last week / 500+ purchased in the past 30 days
+    {regex: /(\d[\d,]*(?:\.\d+)?\s?[kKmM]?\+?)\s?(?:bought|purchased|sold|ordered)\s?(?:in\s?)?(?:the\s?)?(?:past|last|previous)\s?(?:\d+\s?)?(month|months|week|weeks|day|days|year|years)/i,
+     value: m => m[1], plus: m => /\+/.test(m[1]), period: m => PERIOD_EN[m[2].toLowerCase()]},
+    // 지난달 100개 이상 구매 / 지난주 50개 구매 / 지난 달 100개 넘게 구매
+    {regex: /지난\s?(달|주|월|해|년)\s?(\d[\d,]*(?:\.\d+)?\s?[만천kK]?\+?)\s?개?\s?(이상|넘게|초과)?\s?(?:구매|판매|주문)/,
+     value: m => m[2], plus: m => /\+/.test(m[2]) || !!m[3], period: m => PERIOD_KO[m[1]]},
+    // 최근 한 달간 100개 이상 구매 / 최근 1개월 100개 이상 판매 / 최근 일주일 50개 구매
+    {regex: /최근\s?(?:한\s?|1\s?)?(달|개월|주일|주|일|년)\s?(?:간|동안)?\s?(\d[\d,]*(?:\.\d+)?\s?[만천kK]?\+?)\s?개?\s?(이상|넘게|초과)?\s?(?:구매|판매|주문)/,
+     value: m => m[2], plus: m => /\+/.test(m[2]) || !!m[3], period: m => PERIOD_KO[m[1]]},
+    // 월 100개 이상 판매 / 주 50개 이상 구매 (한 글자 기간 단어 + 수량)
+    {regex: /(?:^|[^가-힣])(월|주|일)\s?(\d[\d,]*(?:\.\d+)?\s?[만천kK]?\+?)\s?개?\s?(이상|넘게|초과)?\s?(?:구매|판매|주문)/,
+     value: m => m[2], plus: m => /\+/.test(m[2]) || !!m[3], period: m => PERIOD_KO[m[1]]},
+  ];
+  const parseRecentSales = text => {
     const source = normalize(text);
+    for (const pattern of RECENT_PATTERNS) {
+      const match = source.match(pattern.regex);
+      if (!match) continue;
+      const count = parseCount(pattern.value(match));
+      if (!count) continue;
+      return {raw: match[0].replace(/^[^\d가-힣a-zA-Z]+/, '').trim(), value: count.value, plus: count.plus || pattern.plus(match), period: pattern.period(match) || 'month'};
+    }
+    return null;
+  };
+  /** 기간 한정 구매량 문구를 공백으로 지워 누적 판매량 해석에서 제외한다. */
+  const stripRecentSales = source => {
+    let result = source;
+    for (const pattern of RECENT_PATTERNS) result = result.replace(new RegExp(pattern.regex.source, pattern.regex.flags + 'g'), ' ');
+    return result;
+  };
+  const parseSold = text => {
+    const source = stripRecentSales(normalize(text));
     // "판매 1위 ... 구매 345"처럼 첫 일치가 순위 문구일 수 있으므로 모든 일치를 순서대로 검사한다.
     for (const match of source.matchAll(/(\d[\d,]*(?:\.\d+)?\s?[kKmM만천]?\+?)\s?(?:개|건|pcs|pieces)?\s?(?:sold|판매됨|판매|구매|bought|orders?|주문)(?![가-힣a-z])/gi)) {
       if (NOT_COUNT.test(source.slice(match.index + match[1].length))) continue;
@@ -185,12 +232,19 @@
   const parseRating = text => {
     const stripped = normalize(text).replace(PRICE, m => (/[₩$€£¥원]|USD|KRW/.test(m) ? ' ' : m));
     const value = '(5(?:\\.0{1,2})?|[0-4](?:\\.\\d{1,2})?)';
+    const decimal = '([0-4]\\.\\d{1,2}|5\\.0{1,2})';
     const count = '(?:\\s?\\(\\s?(\\d[\\d,]*\\s?[kKmM만천]?\\+?)\\s?\\))?';
     const patterns = [
-      new RegExp(`(?:평점|별점|상품평점|rating|rated|stars?)\\s*:?\\s*${value}(?![\\d.%])${count}`, 'i'),
-      new RegExp(`★\\s?${value}(?![\\d.%])${count}`),
-      new RegExp(`(?:^|[^\\d.])${value}\\s?(?:\\/\\s?5|점|stars?|★|out of 5)(?![\\d.%])${count}`, 'i'),
-      new RegExp(`(?:^|[^\\d.x×])([0-4]\\.\\d{1,2}|5\\.0{1,2})\\s?\\(\\s?(\\d[\\d,]*\\s?[kKmM만천]?\\+?)\\s?\\)`),
+      // 최댓값이 먼저 나오는 한국어 표현(Amazon 한국어 "별 5개 중 4.3개"). "5개 중 3개 남음" 같은 재고 문구와
+      // 겹치지 않도록 "별"/"만점" 키워드가 없으면 소수 평점만 인정한다.
+      new RegExp(`별\\s?5\\s?개\\s?중\\s?${value}\\s?개?(?![\\d.%])${count}`),
+      new RegExp(`5\\s?점\\s?만점\\s?(?:에|중)?\\s?${value}\\s?점?(?![\\d.%])${count}`),
+      new RegExp(`(?:^|[^\\d.])5\\s?(?:개|점)?\\s?중\\s?${decimal}\\s?(?:개|점)?(?![\\d.%])${count}`),
+      // "4.1 out of 5 stars 2,700"에서 키워드 표현("stars 2")이 먼저 잡히지 않도록 값 우선 표현을 앞에 둔다.
+      new RegExp(`(?:^|[^\\d.])${value}\\s?(?:\\/\\s?5|점|stars?|★|out of 5)(?![\\d.%]|,\\d)${count}`, 'i'),
+      new RegExp(`(?:평점|별점|상품평점|rating|rated|stars?)\\s*:?\\s*${value}(?![\\d.%]|,\\d)${count}`, 'i'),
+      new RegExp(`★\\s?${value}(?![\\d.%]|,\\d)${count}`),
+      new RegExp(`(?:^|[^\\d.x×])${decimal}\\s?\\(\\s?(\\d[\\d,]*\\s?[kKmM만천]?\\+?)\\s?\\)`),
     ];
     for (const pattern of patterns) {
       const match = stripped.match(pattern);
@@ -232,6 +286,56 @@
     return null;
   };
 
-  return {normalize, hidden, textOf, findPrices, parsePrice, parseNumber, parseCount, parseSold, parseDiscount,
-    parseRating, parseReviews, parseShipping, parseAvailability, currencyCode, PRICE, BLOCK, SKIP};
+  /**
+   * URL 정규화(v0.3.0). 추적용으로 널리 알려진 쿼리 키와 Amazon식 `/ref=…` 경로 조각, 프래그먼트만 제거한다.
+   * 서명·인증·세션용 쿼리는 알 수 없으므로 목록에 없는 키는 모두 보존한다(보수적 기본값).
+   * 안정 식별자(stable_id)는 호출자가 준 정규식(첫 캡처 그룹)을 우선하고, 없으면 일반적인 상품 번호
+   * 패턴(Amazon ASIN `/dp/<10자>`, `/item/<숫자>`, `/products/<숫자>`, `pcode=<숫자>` 등)을 쓴다.
+   * 결과: {raw, canonical, stable_id, removed(제거한 키/조각 목록)}.
+   */
+  const TRACKING_KEYS = new Set(['ref', 'ref_', 'qid', 'sr', 'sprefix', 'crid', 'dib', 'dib_tag', 'keywords', 'th', 'psc',
+    'fbclid', 'gclid', 'dclid', 'msclkid', 'yclid', 'ttclid', 'igshid', 'mc_cid', 'mc_eid', 'spm', 'scm', 'algo_pvid', 'algo_exp_id',
+    'pdp_npi', 'pdp_ext_f', 'gatewayadapt', 'aff_fcid', 'aff_fsk', 'aff_platform', 'aff_trace_key', 'terminal_id', 'afsmtrack',
+    'utm_id', '_t', 'traffic_source', 'source', 'ref_src', 'cm_mmc', 'linkcode', 'tag', 'ascsubtag', 'smid', 'rps', 'content-id',
+    'pd_rd_i', 'pd_rd_r', 'pd_rd_w', 'pd_rd_wg', 'pf_rd_p', 'pf_rd_r', 'pf_rd_i', 'pf_rd_m', 'pf_rd_s', 'pf_rd_t']);
+  const TRACKING_PREFIXES = ['utm_', 'pd_rd_', 'pf_rd_', 'ref_', 'ga_', 'hsa_', 'mkt_', 'vero_'];
+  const ID_PATTERNS = [
+    /\/(?:dp|gp\/product|gp\/aw\/d|product-reviews)\/([A-Z0-9]{10})(?:[\/?#]|$)/,
+    /\/(?:item|items|product|products|goods|detail|prod|p|dp|vp\/products)\/(\d{4,})(?:[\/.?#]|$)/i,
+    /[?&](?:pcode|itemno|item_id|itemid|product_id|productid|goods_no|goodsno|prodno|pid|productno|goodscode)=([A-Za-z0-9_-]{3,})/i,
+  ];
+  const canonicalUrl = (raw, options = {}) => {
+    const result = {raw, canonical: raw, stable_id: null, removed: []};
+    if (!raw) return result;
+    let url;
+    try { url = new URL(raw); } catch { return result; }
+    if (/^\/.*\/ref=[^/]*$/.test(url.pathname) || /\/ref=/.test(url.pathname)) {
+      url.pathname = url.pathname.replace(/\/ref=.*$/, '');
+      result.removed.push('/ref=');
+    }
+    for (const key of [...url.searchParams.keys()]) {
+      const lower = key.toLowerCase();
+      if (TRACKING_KEYS.has(lower) || TRACKING_PREFIXES.some(prefix => lower.startsWith(prefix))) {
+        url.searchParams.delete(key);
+        result.removed.push(key);
+      }
+    }
+    if (url.hash) { url.hash = ''; result.removed.push('#fragment'); }
+    result.canonical = url.href;
+    if (options.stableId) {
+      try {
+        const match = raw.match(new RegExp(options.stableId, 'i'));
+        result.stable_id = match ? (match[1] ?? match[0]) : null;
+      } catch { throw {code: 'INVALID_REGEX', field: options.field || 'stable_id'}; }
+    } else {
+      for (const pattern of ID_PATTERNS) {
+        const match = raw.match(pattern);
+        if (match) { result.stable_id = match[1]; break; }
+      }
+    }
+    return result;
+  };
+
+  return {normalize, hidden, textOf, findPrices, parsePrice, parseNumber, parseCount, parseSold, parseRecentSales, parseDiscount,
+    parseRating, parseReviews, parseShipping, parseAvailability, canonicalUrl, currencyCode, PRICE, BLOCK, SKIP};
 })()

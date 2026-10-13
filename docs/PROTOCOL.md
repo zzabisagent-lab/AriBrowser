@@ -1,4 +1,4 @@
-# AriBrowser JSONL v1 (0.2.0)
+# AriBrowser JSONL v1 (0.3.0)
 
 UTF-8 JSON 객체 하나를 한 줄에 전송합니다. 요청은 순차 실행되며 `id`가 응답에 그대로 전달됩니다. 브라우저는 첫 프로필/탐색 요청에서 시작됩니다. EOF 또는 `close`에서 정상 종료하며 세션 저장소를 보존합니다. GUI 대신 로컬 프로세스 파이프를 연결하는 Agent용 브라우저입니다.
 
@@ -7,6 +7,21 @@ UTF-8 JSON 객체 하나를 한 줄에 전송합니다. 요청은 순차 실행�
 ```
 
 성공은 `{"id":...,"ok":true,"result":...}`, 실패는 `{"id":...,"ok":false,"error":{"code":...,"message":...,"details":...}}`입니다. 잘못된 JSON이나 명령 이후에도 연결은 유지됩니다. 작업 실패는 롤백을 뜻하지 않습니다. `snapshot`/`events`로 실제 결과를 확인한 뒤 재시도하세요. 알 수 없는 매개변수는 `INVALID_ARGUMENT`이며 `details.allowed`에 허용 목록을 돌려줍니다.
+
+## 0.3.0에서 달라진 기본 동작
+
+| 항목 | 0.2.0 | 0.3.0 |
+| --- | --- | --- |
+| `dedupe` 키가 모두 null인 레코드 | `[null]` 키로 서로 중복 처리(레코드 손실) | 비교에서 제외하고 보존. `dedupe{usable_records, skipped_records, key_coverage, warning}` 추가 |
+| `quality` | `confidence`, `coverage`, `records`, `hint` | + `source_records`, `output_records`, `deduplicated`, `duplicate_ratio`, `dedupe_key_coverage`, `missing`, `warnings`. 제거율/커버리지 이상이면 `high`를 주지 않음 |
+| `missing` 사유 | `no_match`, `attribute_empty`, `empty_text`, `regex_no_match` | `selector_no_match`, `relation_no_match`, `attribute_empty`, `text_empty`, `regex_no_match`, `parse_failed`, `unsupported_locale_pattern` |
+| 필드 명세 `selector: ":scope"` | null(item.querySelectorAll에 걸리지 않음) | 레코드 자체(`source: "self"`, `":self"`와 같음) |
+| `type: "url"` 필드의 href 없는 요소 | null | 가장 가까운/내부 `a[href]`로 자동 탐색, 출처는 `record.sources` |
+| 자동 필드 | …`sold`, `rating`, `reviews` | + `recent_sales`(기간 한정 구매량). `sold`는 기간 표현을 제외 |
+| 평점 해석 | 값이 먼저 나오는 표현만 | + `별 5개 중 4.3개`, `5점 만점에 4.3점`, `5개 중 4.3` |
+| `profile.create` | viewport/mobile/device_scale_factor/media_policy | + `locale`, `timezone_id`; 응답에 `settings`/`runtime`; 설정은 프로필에 저장되어 재실행 시 유지 |
+| `navigate` 응답 | 요약 + readiness + include | + `runtime`(첫 응답 전체, 이후 `runtime_id`). `mode="minimal"`로 요약 생략 |
+| `page.product` | 상품 요약 | + `recent_sales`, `canonical_url`, `stable_id`, `canonical_source` |
 
 ## 0.2.0에서 달라진 기본 동작
 
@@ -44,23 +59,23 @@ UTF-8 JSON 객체 하나를 한 줄에 전송합니다. 요청은 순차 실행�
 
 | 명령 | params | 동작 |
 | --- | --- | --- |
-| `capabilities` | 없음 | 버전, 명령/조작 목록, 요소 필드, 상태 기본값, 대기 조건, tokenizer, 진단 코드, OCR 가능 여부, 브라우저 정책/실제 실행 파일, readiness 상태, include 종류, 자동 필드 |
-| `profile.create` | `name=default`, `viewport={width,height}`, `mobile=false`, `device_scale_factor=1`, `media_policy=defer` | 영구 프로필 열기; 잔여 잠금은 복구, 사용 중 잠금은 `PROFILE_LOCKED` |
-| `profile.list` | 없음 | 열린 프로필과 자원 정책 |
+| `capabilities` | 없음 | 버전, 명령/조작 목록, 요소 필드, 상태 기본값, 대기 조건, tokenizer, 진단 코드, OCR 가능 여부, 브라우저 정책/실제 실행 파일, `runtime`, readiness 상태, include 종류/탐색 모드, 자동 필드/필드 명세 키/누락 사유, 프로필 설정 |
+| `profile.create` | `name=default`, `viewport={width,height}`, `mobile=false`, `device_scale_factor=1`, `media_policy=defer`, `locale?`, `timezone_id?` | 영구 프로필 열기(아래 "프로필 설정"); 잔여 잠금은 복구, 사용 중 잠금은 `PROFILE_LOCKED`. 응답에 `settings`와 `runtime` |
+| `profile.list` | 없음 | 열린 프로필과 자원 정책·적용 설정(locale/timezone_id/viewport/mobile/device_scale_factor), `runtime` |
 | `profile.close` | `name` | 프로필 종료; 프로세스 종료/잔여 수와 잠금 해제 여부 반환 |
 | `tab.new` | `profile?`, `url?` | 새 탭을 만들고 활성화; URL이 있으면 요약 반환 |
 | `tab.list` | 없음 | ID, 프로필, URL, 제목, 활성/로딩/충돌 상태 |
 | `tab.switch` | `tab` | 활성 탭 전환 및 요약 |
 | `tab.close` | `tab?` | 탭 종료 및 남은 탭 목록 |
-| `navigate` | `url`, `tab?`, `mode=summary`, `settle_ms=150`, `expect?`, `ready=true`, `include=[]`, `extract={}`, `limit`, `offset`, `include_hidden`, `region`, `max_regions=20`, `max_headings=12`, VIEW | 탐색 → 로딩 품질 검증(재시도) → 요약/변경분/화면 + `verification` + `readiness` + include 결과 |
+| `navigate` | `url`, `tab?`, `mode=summary`(또는 `minimal`/`full`/`viewport`/`main`/`changes`), `settle_ms=150`, `expect?`, `ready=true`, `include=[]`, `extract={}`, `limit`, `offset`, `include_hidden`, `region`, `max_regions=20`, `max_headings=12`, VIEW | 탐색 → 로딩 품질 검증(재시도) → 요약/최소/변경분/화면 + `verification` + `readiness` + include 결과 + `runtime` |
 | `snapshot` | `tab?`, `mode=full`, `region?`, `offset=0`, `limit=500`, `include_hidden=false`, `max_regions`, `max_headings`, VIEW | 요약/전체/부분/변경분 관측 |
 | `find` | `tab?`, `text?`, `role?`, `region?`, `actionable?`, `include_hidden=true`, `offset=0`, `limit=100`, `match=contains`, `operator=and`, `in=[name,text,value]`, `sort_by=document`, `dedupe=false`, `with_parent=0`, `with_children=0`, `child_roles?`, VIEW | 검색; 아래 "검색" 참고 |
 | `detail` | `element`, `tab?`, `radius=2`, `fields?`, `compact=false` | 상세(`internal_id` 포함), 조상, 직계 자식, 앞뒤 문맥 |
 | `table` | `element`, `tab?`, `rows?`, `columns?` | 표의 선택한 행/열; 인덱스는 0부터 시작하며 헤더 행 포함 |
 | `query` | `tab?`, `frame?`, `selector`, `scope?`, `fields=[id,tag,text,href]`, `attributes=[]`, `text?`, `match=contains`, `include_hidden=false`, `offset=0`, `limit=100`, `dedupe=false`, `max_text=500`, `max_bytes`, `max_elements`, `max_tokens` | 브라우저 내부 CSS 선택자 질의(필드에 `sold`/`rating`/`reviews`/`discount` 포함) |
-| `extract` | `tab?`, `frame?`, `container?`, `item?`, `fields?`, `text?`, `match`, `include_hidden=false`, `offset=0`, `limit=50`, `dedupe=false`, `max_text=500`, `max_bytes`, `max_elements`, `max_tokens` | 반복 레코드 구조화 추출 + `quality` |
+| `extract` | `tab?`, `frame?`, `container?`, `item?`, `fields?`, `text?`, `match`, `include_hidden=false`, `offset=0`, `limit=50`, `dedupe=false`, `explain=false`, `max_text=500`, `max_bytes`, `max_elements`, `max_tokens` | 반복 레코드 구조화 추출 + `quality` + `dedupe` 통계 |
 | `page.state` | `tab?`, `compare?` | 정렬/필터/페이지/전체 건수/페이지당 수/검색어/토글과 `fingerprint` |
-| `page.product` | `tab?` | 상품 상세 요약(제목/가격/원가/할인/판매량/평점/리뷰/배송/재고/브랜드/판매자/옵션/이미지)과 출처 |
+| `page.product` | `tab?` | 상품 상세 요약(제목/가격/원가/할인/판매량/최근 구매량/평점/리뷰/배송/재고/브랜드/판매자/옵션/이미지)과 출처, canonical URL/안정 식별자 |
 | `batch` | `steps=[{command, params, id?}]`(1~20), `stop_on_error=true` | 여러 명령을 한 왕복에 순차 실행; `batch`/`close`는 포함 불가 |
 | `action` | `action`, `tab?`, `expect?`, `verify=true`, `mode=changes`, `settle_ms=150`, 조작 매개변수, `limit`, `offset`, `include_hidden`, `region`, VIEW | 입력 후 변경분 + `verification` + `delta` |
 | `render` | 아래 렌더 매개변수 | 요청 범위 PNG 및 메타데이터 |
@@ -77,6 +92,40 @@ UTF-8 JSON 객체 하나를 한 줄에 전송합니다. 요청은 순차 실행�
 | `doctor` | `launch=true` | 실행 환경 진단(버전/Chromium/사용자/디스플레이/AppArmor/userns/샌드박스/프로세스/잠금) |
 | `session.cleanup` | 없음 | 현재 세션 소유가 아닌 잔여 Chromium 프로세스 종료와 잔여 잠금 제거 |
 | `close` | 없음 | 모든 프로필을 저장하고 연결 종료; 프로세스/잠금 정리 보고 |
+
+### 프로필 설정(`profile.create.locale`, `timezone_id`)
+
+같은 URL이라도 브라우저 로캘에 따라 상품명·평점 문자열·통화·날짜가 달라져 Agent 간 결과가 재현되지 않습니다. `locale`(BCP 47, 예: `en-US`, `ko-KR`; `en_US`는 `en-US`로 정규화)은 `Accept-Language` 헤더와 `navigator.language`에, `timezone_id`(IANA, 예: `UTC`, `Asia/Seoul`)는 JavaScript `Date`/`Intl` 시간대에 적용됩니다. 잘못된 값은 `INVALID_ARGUMENT`입니다.
+
+```json
+{"id":1,"command":"profile.create","params":{"name":"benchmark","locale":"en-US","timezone_id":"UTC","viewport":{"width":1280,"height":800}}}
+```
+
+응답: `{"profile":"benchmark","persistent":true,"media_policy":"defer","settings":{"locale":"en-US","timezone_id":"UTC","viewport":{…},"mobile":false,"device_scale_factor":1,"media_policy":"defer"},"locale":"en-US","timezone_id":"UTC","tabs":[…],"runtime":{…}}`. 적용 설정은 프로필 디렉터리의 `aribrowser-profile.json`에 저장되어 같은 이름의 프로필을 옵션 없이 다시 열면 그대로 쓰입니다(명시한 값 > 저장된 값 > CLI `--locale`/`--timezone` 세션 기본값). `profile.list`와 `capabilities.profiles`에서 확인할 수 있습니다.
+
+### 최소 탐색(`navigate.mode="minimal"`)
+
+사이트 구조를 이미 알아 `include`로 구조화 결과만 필요할 때 씁니다. 관측(DOM 수집)과 요약을 생략하므로 영역/제목/역할 수/검색창/활동 집계가 없고 시간도 줄어듭니다. readiness 판정과 오류 응답(`PAGE_EMPTY`/`PAGE_BLOCKED`)은 그대로입니다.
+
+```json
+{"id":1,"command":"navigate","params":{"url":"https://www.amazon.com/s?k=guitar+headphone+amp","mode":"minimal","include":["records"],
+ "extract":{"item":"[data-asin]:not([data-asin=''])","limit":60,"fields":{"title":"h2","url":{"selector":"h2","type":"url","canonical":true},
+            "price":{"selector":".a-price .a-offscreen","type":"price"},"rating":{"selector":".a-icon-alt","type":"rating"},"recent":{"source":"self"}}}}}
+```
+
+응답: `page{url,title,http_status}`, `readiness{status,reasons,kind,waited_ms,attempts,hint?,signals?(ready가 아닐 때),probe?}`, `verification`, 요청한 `records`/`product`/`state`/`events`, `errors`(HTTP 4xx/5xx 또는 오류성 이벤트가 있을 때만: `http_status`, `event_counts`, `events` 3건), `runtime`, `cursor`, `budget`. minimal 탐색 뒤의 첫 `action`/`snapshot(mode=changes)`은 새 기준선을 잡습니다.
+
+### 실행 엔진 정보(`runtime`)
+
+첫 `profile.create` 또는 첫 `navigate` 응답과 `capabilities.runtime`에 실제 실행 엔진을 돌려줍니다. 이후 응답은 반복 payload를 줄이기 위해 `{"runtime_id":"rt…"}`만 싣습니다.
+
+```json
+{"runtime_id":"rt3f9a1c","kind":"chrome","product":"HeadlessChrome/146.0.7680.80","version":"146.0.7680.80",
+ "executable":"/opt/google/chrome/chrome","resolved_executable":"/opt/google/chrome/chrome","fallback_from":"SANDBOX_USERNS_RESTRICTED",
+ "sandbox_active":true,"sandbox_source":"namespace_or_profile","sandbox_evidence":{"seccomp_filtered":true},"headless":true,"user_agent":"Mozilla/5.0 …"}
+```
+
+`version`은 CDP `Browser.getVersion`의 제품 문자열에서, `resolved_executable`은 Linux에서 브라우저 주 프로세스의 `/proc/<pid>/exe`에서 읽습니다(launcher 이름으로 추정하지 않음). `kind`는 `bundled`/`chrome`/`chromium`/`msedge`/`brave`/`custom`, `fallback_from`은 번들 Chromium이 실패했을 때의 코드, `sandbox_source`는 `setuid_helper`/`namespace_or_profile`/`none`(`--no-sandbox`)입니다.
 
 ### 화면 모드와 형식
 
@@ -184,9 +233,9 @@ CSS 선택자로 요소를 Chromium 안에서 고르고 요청한 필드만 돌�
 
 - `selector`: CSS 선택자(1~1000자). 문법 오류는 `INVALID_ARGUMENT`입니다.
 - `scope`: 요소 ID 또는 CSS 선택자. 그 요소의 **후손**에서만 찾습니다. `frame`: 프레임 ID(기본 주 프레임).
-- `fields`: `id`, `tag`, `text`(경계 규칙으로 조립한 표시 텍스트), `name`(aria-label/alt/title/placeholder), `role`, `href`(절대 URL), `src`, `value`, `visible`, `classes`, `bounds`, `price`(`{raw, value, currency}`), `number`, `sold`(`{raw, value, plus}`), `rating`(`{raw, value, reviews?}`), `reviews`(`{raw, value, plus}`), `discount`(`{raw, percent}`), `attributes`. `attributes=[...]`로 지정한 속성은 `@속성명` 키로 돌려줍니다(`fields`에 `attributes`가 있으면 `attributes` 객체로).
+- `fields`: `id`, `tag`, `text`(경계 규칙으로 조립한 표시 텍스트), `name`(aria-label/alt/title/placeholder), `role`, `href`(절대 URL), `src`, `value`, `visible`, `classes`, `bounds`, `price`(`{raw, value, currency}`), `number`, `sold`(`{raw, value, plus}`), `recent_sales`(`{raw, value, plus, period}`), `rating`(`{raw, value, reviews?}`), `reviews`(`{raw, value, plus}`), `discount`(`{raw, percent}`), `attributes`. `attributes=[...]`로 지정한 속성은 `@속성명` 키로 돌려줍니다(`fields`에 `attributes`가 있으면 `attributes` 객체로).
 - `text`+`match`: 요소 텍스트/이름 조건. `include_hidden=false`: 숨긴 요소 제외. `dedupe`: `true`(text+href) 또는 필드 배열. `max_text`: 텍스트 길이 상한.
-- 응답: `items`, `total`(선택자 일치 수), `matched`(조건/중복 제거 후), `offset`, `next_offset`, `omitted`, `duplicates_removed`, `frame`, `budget`. `id`가 있는 항목은 바로 `action`/`detail`에 쓸 수 있습니다.
+- 응답: `items`, `total`(선택자 일치 수), `matched`(조건/중복 제거 후), `offset`, `next_offset`, `omitted`, `duplicates_removed`, `dedupe`(요청 시: `keys`, `usable_records`, `skipped_records`, `key_coverage`, `warning?`; 키가 모두 비어 있는 항목은 보존), `frame`, `budget`. `id`가 있는 항목은 바로 `action`/`detail`에 쓸 수 있습니다.
 
 임의 JavaScript는 실행하지 않습니다. 선택자·필드·속성 이름은 데이터로만 전달되며 쿠키·저장소·네트워크 API에는 접근하지 않습니다.
 
@@ -195,12 +244,25 @@ CSS 선택자로 요소를 Chromium 안에서 고르고 요청한 필드만 돌�
 상품 카드, 게시글, 검색 결과처럼 같은 구조가 반복되는 항목을 레코드 단위로 묶습니다. 한 레코드의 필드는 그 레코드 요소 안에서만 읽으므로 다른 레코드의 값과 섞이지 않습니다.
 
 - `container`: 요소 ID 또는 CSS 선택자(기본 문서 본문). `item`: 레코드 요소 선택자. 생략하면 같은 서명(태그+클래스)을 가진 형제가 3개 이상이고 내용이 있는 그룹을 자동 감지하며, `detection`에 방법/서명/컨테이너 ID/후보 목록을 돌려줍니다.
-- `fields` 생략 시 자동 필드: `title`, `url`, `price`, `image`, `text`(필수 후보; 없으면 `missing`)와 있을 때만 포함하는 `original_price`(취소선/원가 요소, 또는 할인율 표기가 있을 때 더 큰 가격), `discount`(%), `shipping`, `sold`, `rating`(0~5; 평점/별점/★/점//5/"(리뷰 수)" 문맥이 있을 때만), `reviews`. 지정 시 `{이름: "선택자"}` 또는 `{이름: {selector?, attr?, type=text|number|price|url|count|rating, all=false, regex?}}`. `selector`를 생략하면 레코드 요소 자체를 읽습니다. `regex`의 첫 캡처 그룹(없으면 전체 일치)을 값으로 씁니다.
+- `fields` 생략 시 자동 필드: `title`, `url`, `price`, `image`, `text`(필수 후보; 없으면 `missing`)와 있을 때만 포함하는 `original_price`(취소선/원가 요소, 또는 할인율 표기가 있을 때 더 큰 가격), `discount`(%), `shipping`, `sold`(누적 판매량), `recent_sales`(기간 한정 구매량 `{raw, value, plus, period=month|week|day|year}`: "100+ bought in past month", "지난달 100개 이상 구매"; `sold`와 같은 수치로 취급하지 않음), `rating`(0~5; 평점/별점/★/점//5/"(리뷰 수)" 문맥 또는 `별 5개 중 4.3개`/`5점 만점에 4.3점` 같은 최댓값 우선 표현), `reviews`.
+- 지정 필드 명세: `{이름: "선택자"}` 또는 `{이름: {selector?, source?, attr?, type=text|number|price|url|count|rating|sold|recent_sales|reviews|discount|shipping, all=false, regex?, relation?, closest?, canonical?, stable_id?}}`. `sold`/`recent_sales`/`reviews`/`discount`/`shipping`은 자동 필드와 같은 해석기를 지정 요소(또는 `source: "self"`로 카드 전체)에 적용해 작은 객체만 돌려줍니다.
+  - `selector` 생략, `source: "self"`, `selector: ":self"`, `selector: ":scope"`는 레코드 요소 자체를 읽습니다(카드 전체 표시 텍스트).
+  - `relation: "closest"`는 선택 요소에서 가장 가까운 조상(`closest`, 기본 `a[href]`)으로 대상을 바꿉니다. 조상이 레코드 밖이면 `relation_no_match`로 null입니다(다른 카드의 값을 가져오지 않음).
+  - `type: "url"`에서 `attr`이 없으면 선택 요소의 href → 레코드 안의 가장 가까운 `a[href]` → 내부 첫 `a[href]` 순으로 찾고, 자기 href가 아니면 `record.sources[이름]`에 `closest_link`/`inner_link`를 남깁니다. `<a><h2>…</h2></a>`와 `<h2><a>…</a></h2>` 구조 모두 `{"selector": "h2", "type": "url"}`로 URL을 얻습니다.
+  - `canonical: true`(`type: "url"` 전용)는 값을 `{raw, canonical, stable_id, removed}`로, `canonical: "compact"`는 `{canonical, stable_id}`만 돌려줍니다(추적 URL이 긴 사이트에서 레코드당 수백 바이트 절약). 알려진 추적 키(`ref`, `utm_*`, `qid`, `sr`, `sprefix`, `crid`, `dib`, `keywords`, `th`, `psc`, `spm`, `scm`, `algo_pvid`, `pd_rd_*`, `pf_rd_*`, `fbclid`, `gclid` 등)와 Amazon식 `/ref=…` 경로 조각, 프래그먼트만 제거하며 목록에 없는 쿼리(서명·인증용 포함)는 보존합니다. `stable_id`는 `stable_id` 정규식(첫 캡처 그룹)을 우선하고, 없으면 `/dp/<ASIN>`, `/item/<숫자>`, `/products/<숫자>`, `pcode=<숫자>` 같은 일반 패턴을 씁니다. `dedupe`는 이 객체를 `stable_id`(없으면 `canonical`)로 비교합니다.
+  - `regex`의 첫 캡처 그룹(없으면 전체 일치)을 값으로 씁니다.
 - 텍스트 조립 규칙: 블록 요소 경계는 공백, 인라인 경계는 앞 조각이 통화 기호·`.`·`,`로 끝나거나 뒤 조각이 `.`·`,`로 시작할 때만 붙입니다. 그래서 `<span>₩12,345</span><span>1,000+ 판매</span>`는 "₩12,345 1,000+ 판매", `<span>US $</span><span>12</span><span>.</span><span>34</span>`는 "US $12.34"입니다. 통화 표기는 ISO 코드(KRW/USD/EUR/GBP/JPY/CNY/CAD/AUD)로 통일합니다.
-- `quality`: `{confidence: high|medium|low|none, coverage: {필드: 값이 있는 레코드 비율}, records, hint?}`. 자동 감지에서는 title/url/price 커버리지 평균이 0.8 이상이면 `high`입니다. `low`/`none`이면 `hint`가 `container`/`item`/`fields` 지정을 안내합니다.
-- 레코드: `{index, id, fields, missing?}`. `missing`은 필드별 누락 원인(`no_match`, `attribute_empty`, `empty_text`, `regex_no_match`)입니다. 누락 필드 값은 `null`입니다.
-- `dedupe`: `true`(url, 없으면 title+price) 또는 필드 배열. `text`/`match`로 레코드 텍스트 조건을 걸 수 있습니다.
-- 응답: `records`, `total`, `matched`, `duplicates_removed`, `detection`, `quality`, `offset`, `next_offset`, `omitted`, `missing_fields`, `frame`, `budget`.
+- 레코드: `{index, id, fields, missing?, sources?, explain?}`. `missing`은 필드별 누락 사유(`selector_no_match`, `relation_no_match`, `attribute_empty`, `text_empty`, `regex_no_match`, `parse_failed`=숫자가 없는 원문, `unsupported_locale_pattern`=숫자는 있지만 해석기가 모르는 표현)이며 누락 값은 `null`입니다. `explain=true`면 필드마다 `{selector_matches, raw(200자), parse_status}`를 `explain`에 돌려줍니다(기본 응답 크기는 그대로; raw에는 비밀번호가 가려진 표시 텍스트/속성만).
+- `dedupe`: `true`(url이 하나라도 있으면 url, 없으면 title+price) 또는 필드 배열. 키가 모두 null/빈 값인 레코드는 비교에서 제외하고 **보존**합니다. 응답 `dedupe{keys, usable_records, skipped_records, duplicates_removed, key_coverage{키: 원본 대비 유효값 비율}, warning?}`로 "URL 선택자가 틀려 전부 null"인 상황을 바로 알 수 있습니다. 복합 키는 유효한 값의 조합으로 비교합니다. `text`/`match`로 레코드 텍스트 조건을 걸 수 있습니다.
+- `quality`: `{confidence: high|medium|low|none, coverage: {필드: 출력 레코드 중 값이 있는 비율}, records, source_records, output_records, deduplicated, duplicate_ratio, dedupe_key_coverage?, missing?{필드: {사유: 수}}, warnings?, hint?}`. 자동 감지에서는 title/url/price 커버리지 평균이 0.8 이상이면 `high`입니다. 다음 경우 경고를 남기고 `high`를 돌려주지 않습니다: 제거율 50% 이상, dedupe 키 커버리지 50% 미만, 핵심 필드가 출력 레코드 전체에서 같은 값, 어떤 레코드에서도 요소를 찾지 못한 지정 필드. `low`/`none`이거나 선택자가 전부 실패하면 `hint`가 `container`/`item`/`fields`/`source: "self"`/`relation`/`explain` 사용을 안내합니다.
+- 응답: `records`, `total`, `matched`, `duplicates_removed`, `dedupe?`, `detection`, `quality`, `offset`, `next_offset`, `omitted`, `missing_fields`, `frame`, `budget`.
+
+```json
+{"records":[{"index":0,"id":"t1e20","fields":{"title":"Valeton Rushead Max","url":{"raw":"https://www.amazon.com/…/dp/B07W3K92ZM/ref=sr_1_1?dib=…&qid=…&sr=8-1","canonical":"https://www.amazon.com/…/dp/B07W3K92ZM","stable_id":"B07W3K92ZM","removed":["/ref=","dib","qid","sr"]},
+   "rating":{"raw":"별 5개 중 4.3개","value":4.3},"recent":"… 지난달 100개 이상 구매 …"},"sources":{"url":"closest_link"}}],
+ "total":48,"matched":47,"duplicates_removed":1,"dedupe":{"keys":["url"],"usable_records":48,"skipped_records":0,"duplicates_removed":1,"key_coverage":{"url":1}},
+ "quality":{"confidence":"high","coverage":{"title":1,"url":1,"rating":0.98,"recent":1},"records":47,"source_records":48,"output_records":47,"deduplicated":1,"duplicate_ratio":0.021,"dedupe_key_coverage":{"url":1}}}
+```
 
 ### 상품 상세 요약(`page.product`)
 
@@ -215,7 +277,7 @@ CSS 선택자로 요소를 Chromium 안에서 고르고 요청한 필드만 돌�
  "sources":{"title":"json-ld","price":"json-ld","original_price":"dom","discount":"text","sold":"text","rating":"json-ld","reviews":"json-ld","shipping":"text"}}
 ```
 
-`detected`는 제목과 가격을 모두 찾았는지, `confidence`는 가격 출처가 구조화 데이터/메타면 `high`, DOM 휴리스틱이면 `medium`입니다. 원가는 취소선 요소에서만 읽어 다른 판매처 가격을 원가로 오인하지 않습니다. `og:title`이 사이트 이름과 같거나 `og:type=website`면 h1을 제목으로 우선합니다. 찾지 못하면 `detected=false`와 `hint`를 돌려줍니다.
+응답에는 `recent_sales`(기간 한정 구매량), `canonical_url`/`stable_id`/`canonical_source`(`link_canonical`이면 페이지가 선언한 `<link rel="canonical">`, `url`이면 현재 URL에서 추적 매개변수를 제거한 값)도 있습니다. `detected`는 제목과 가격을 모두 찾았는지, `confidence`는 가격 출처가 구조화 데이터/메타면 `high`, DOM 휴리스틱이면 `medium`입니다. 원가는 취소선 요소에서만 읽어 다른 판매처 가격을 원가로 오인하지 않습니다. `og:title`이 사이트 이름과 같거나 `og:type=website`면 h1을 제목으로 우선합니다. 찾지 못하면 `detected=false`와 `hint`를 돌려줍니다.
 
 ### 페이지 상태(`page.state`)
 
@@ -310,6 +372,6 @@ CSS 선택자로 요소를 Chromium 안에서 고르고 요청한 필드만 돌�
 
 ## 이벤트와 오류
 
-이벤트는 seq/time/type과 tab/profile 등의 문맥을 갖습니다. `loading_started`, `dom_ready`, `loading_finished`, `navigation`, `frame_navigation`, `redirect`, `navigation_retry`, `tab_created`, `tab_closed`, `popup_created`, `dialog_opened`, `dialog_closed`, `download_started`, `download_completed`, `download_failed`, `network_failed`, `not_found`, `authentication_required`, `server_error`, `http_error`, `script_error`, `browser_crashed`, `browser_fallback`, `browser_selected`, `profile_closed`, `profile_lock_recovered`, `background_error`를 제공합니다. 버퍼 초과는 `events_omitted=true`로 표시합니다.
+이벤트는 seq/time/type과 tab/profile 등의 문맥을 갖습니다. `loading_started`, `dom_ready`, `loading_finished`, `navigation`, `frame_navigation`, `redirect`, `navigation_retry`, `tab_created`, `tab_closed`, `popup_created`, `dialog_opened`, `dialog_closed`, `download_started`, `download_completed`, `download_failed`, `network_failed`, `not_found`, `authentication_required`, `server_error`, `http_error`, `script_error`, `browser_crashed`, `browser_fallback`, `browser_selected`, `profile_closed`, `profile_lock_recovered`, `profile_settings_ignored`, `background_error`를 제공합니다. 버퍼 초과는 `events_omitted=true`로 표시합니다.
 
 주요 오류 코드는 `INVALID_JSON`, `INVALID_REQUEST`, `INVALID_ARGUMENT`, `UNKNOWN_COMMAND`, `TAB_NOT_FOUND`, `PROFILE_NOT_FOUND`, `PROFILE_EXISTS`, `PROFILE_LOCKED`, `ELEMENT_NOT_FOUND`, `STALE_ELEMENT`, `ELEMENT_NOT_ACTIONABLE`, `ACTION_FAILED`, `EXPECTATION_NOT_MET`, `NETWORK_FAILED`, `BROWSER_UNAVAILABLE`, `BROWSER_CRASHED`, `BROWSER_ERROR`, `BROWSER_LAUNCH_FAILED`, `PAGE_UNRESPONSIVE`, `WAIT_TIMEOUT`, `PAGE_EMPTY`, `PAGE_BLOCKED`, `FILE_NOT_FOUND`, `RESOURCE_NOT_FOUND`, `RESOURCE_FAILED`, `IO_ERROR`, `SESSION_CLOSED`와 실행 환경 코드 `CHROMIUM_MISSING`, `CHROMIUM_DEPENDENCIES_MISSING`, `SANDBOX_ROOT_USER`, `SANDBOX_USERNS_RESTRICTED`, `SANDBOX_HELPER_INVALID`, `SANDBOX_PROFILE_STALE`, `SANDBOX_PROFILE_NOT_LOADED`, `SANDBOX_LAUNCH_FAILED`, `SYSTEM_BROWSER_MISSING`, `DISPLAY_MISSING`입니다. HTTP 404/500은 렌더 가능한 문서이므로 탐색은 성공 응답이며 `page.http_status`, 요약의 `errors.http_status`와 이벤트에 오류를 표시합니다.

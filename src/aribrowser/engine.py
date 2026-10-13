@@ -16,11 +16,21 @@ v0.2.0에서 추가된 책임:
   `browser_fallback` 이벤트와 `browser_info`로 알린다.
 - 공용 setuid 샌드박스 도우미(sandbox.launch_env)를 실행 환경 변수로 전달한다.
 - 관측 응답에 이벤트 원문 대신 종류별 집계(`activity_view`)를 제공한다.
+
+v0.3.0에서 추가된 책임:
+- 프로필 로캘/시간대(`locale`, `timezone_id`)를 검증해 Playwright 영구 컨텍스트에 적용하고, 프로필 디렉터리의
+  `aribrowser-profile.json`에 저장해 같은 프로필을 다시 열 때 유지한다(Accept-Language·navigator.language·
+  Intl 시간대가 실행 환경이 아니라 프로필 설정을 따르므로 벤치마크 재현성이 좋아진다).
+- 실제 실행 엔진 정보(`runtime`): CDP `Browser.getVersion`의 제품/버전, 프로세스 기준 실행 파일(/proc/<pid>/exe),
+  대체 사유, 샌드박스 활성 여부와 근거를 첫 `profile.create`/`navigate` 응답과 `capabilities`에 돌려준다.
 """
 
 import asyncio
+import hashlib
+import json
 import os
 import re
+import sys
 import time
 import uuid
 from collections import OrderedDict, deque
@@ -58,6 +68,7 @@ class Config:
     max_bytes/max_elements/max_tokens로 재지정할 수 있다. no_sandbox는 명시적으로
     요청했을 때만 True가 되며 어떤 실패 경로에서도 자동으로 켜지지 않는다.
     browser는 실행 파일 선택 정책(auto|bundled|system)이며 executable_path가 있으면 그 경로를 쓴다.
+    locale/timezone_id는 프로필 생성 시 명시하지 않았을 때 쓰는 세션 기본값이다(None이면 Chromium 기본).
     """
 
     data_dir: Path = field(default_factory=lambda: Path.home() / ".aribrowser")
@@ -71,6 +82,53 @@ class Config:
     executable_path: str | None = None
     max_bytes: int = 500_000
     browser: str = "auto"
+    locale: str | None = None
+    timezone_id: str | None = None
+
+
+# BCP 47 언어 태그의 실용적 부분집합: 언어(2~3자), 선택적 문자 체계(4자), 지역(2자 또는 3자리 숫자), 변형.
+LOCALE_TAG = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z]{4})?(?:-(?:[A-Za-z]{2}|\d{3}))?(?:-(?:[A-Za-z0-9]{5,8}|\d[A-Za-z0-9]{3}))*$")
+# IANA 시간대 ID의 문법: "UTC", "Etc/GMT+9", "Asia/Seoul", "America/Argentina/Buenos_Aires".
+TIMEZONE_ID = re.compile(r"^(?:UTC|GMT|Etc/[A-Za-z0-9+\-]+|[A-Z][A-Za-z]+(?:/[A-Za-z0-9_+\-]+){1,2})$")
+# 프로필 디렉터리에 보존하는 설정 파일 이름. 같은 프로필을 다시 열 때 로캘/시간대/화면 설정을 유지한다.
+PROFILE_SETTINGS = "aribrowser-profile.json"
+
+
+def validate_locale(value) -> str | None:
+    """BCP 47 로캘 태그를 검증하고 정규화한다(`en_US` → `en-US`). None은 "지정 안 함"이다."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not LOCALE_TAG.match(value.replace("_", "-")):
+        raise BrowserError("INVALID_ARGUMENT", "locale은 BCP 47 언어 태그입니다(예: en-US, ko-KR).", locale=value)
+    parts = value.replace("_", "-").split("-")
+    parts[0] = parts[0].lower()
+    for index in range(1, len(parts)):
+        if len(parts[index]) == 2:
+            parts[index] = parts[index].upper()
+        elif len(parts[index]) == 4 and parts[index].isalpha():
+            parts[index] = parts[index].title()
+    return "-".join(parts)
+
+
+def validate_timezone(value) -> str | None:
+    """IANA 시간대 ID를 검증한다. 시스템에 tz 데이터베이스가 있으면 실제 목록과도 대조한다.
+
+    Windows의 Python에는 tz 데이터가 없을 수 있어(`available_timezones()`가 비어 있음) 그때는 문법 검사만 하고,
+    Chromium이 거부하면(`Invalid timezone ID`) 실행 단계에서 INVALID_ARGUMENT로 바꾼다.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not TIMEZONE_ID.match(value):
+        raise BrowserError("INVALID_ARGUMENT", "timezone_id는 IANA 시간대 ID입니다(예: UTC, Asia/Seoul).", timezone_id=value)
+    try:
+        import zoneinfo
+
+        available = zoneinfo.available_timezones()
+    except Exception:  # tzdata가 없는 환경
+        available = set()
+    if available and value not in available:
+        raise BrowserError("INVALID_ARGUMENT", "알 수 없는 IANA 시간대 ID입니다.", timezone_id=value)
+    return value
 
 
 @dataclass
@@ -133,6 +191,11 @@ class Engine:
         self.close_report: dict | None = None
         # 실제로 실행한 브라우저(번들/시스템)와 대체 사유. 첫 프로필 실행 때 채운다.
         self.browser_info: dict | None = None
+        # v0.3.0: 프로세스 기준 실행 엔진 정보(runtime)와 "첫 응답에 전체를 실었는지" 표시. 이후 응답은 runtime_id만 싣는다.
+        self.runtime: dict | None = None
+        self.runtime_announced = False
+        # 프로필별 적용 설정(locale/timezone_id/viewport/mobile/device_scale_factor). profile.list와 capabilities가 돌려준다.
+        self.settings: dict[str, dict] = {}
 
     def emit(self, kind: str, **data) -> None:
         """시간/증가 번호가 있는 이벤트를 저장한다. 웹 원문은 항상 데이터 필드에만 둔다."""
@@ -196,22 +259,64 @@ class Engine:
             self.config.data_dir.mkdir(parents=True, exist_ok=True)
             self.playwright = await async_playwright().start()
 
+    def load_settings(self, profile_dir: Path) -> dict:
+        """프로필 디렉터리에 저장된 이전 설정을 읽는다. 없거나 손상됐으면 빈 사전이다."""
+        try:
+            data = json.loads((profile_dir / PROFILE_SETTINGS).read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def save_settings(self, profile_dir: Path, settings: dict) -> None:
+        """적용한 설정을 프로필 디렉터리에 저장한다. 저장 실패는 세션 동작에 영향을 주지 않는다."""
+        try:
+            (profile_dir / PROFILE_SETTINGS).write_text(json.dumps({**settings, "version": 1}, ensure_ascii=False, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+
     async def create_profile(self, name: str = "default", **options) -> dict:
-        """프로필별 Chromium 저장소를 열어 쿠키/로그인을 격리하고 재실행 시 복원한다."""
+        """프로필별 Chromium 저장소를 열어 쿠키/로그인을 격리하고 재실행 시 복원한다.
+
+        v0.3.0: `locale`/`timezone_id`를 받아 검증·적용하고, 명시하지 않은 설정은 이전 실행이 저장한 값
+        (`aribrowser-profile.json`) → 세션 기본값(Config) 순으로 쓴다. 응답에 실제 적용값(`settings`)과
+        실행 엔진 정보(`runtime`)를 싣는다.
+        """
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name):
             raise BrowserError("INVALID_ARGUMENT", "프로필 이름은 영문/숫자/_/- 1~64자입니다.")
         if name in self.contexts:
             raise BrowserError("PROFILE_EXISTS", "이미 열린 프로필입니다.", profile=name)
         await self.start()
-        policy = options.get("media_policy", self.config.media_policy)
-        if policy not in {"defer", "allow"}:
-            raise BrowserError("INVALID_ARGUMENT", "media_policy는 defer 또는 allow입니다.")
-        viewport = options.get("viewport", {"width": self.config.width, "height": self.config.height})
-        if not isinstance(viewport, dict) or any(type(viewport.get(k)) is not int or not 240 <= viewport[k] <= 7680 for k in ("width", "height")):
-            raise BrowserError("INVALID_ARGUMENT", "화면 너비/높이는 240~7680 정수입니다.")
         profile_dir = self.config.data_dir / "profiles" / name
         profile_dir.mkdir(parents=True, exist_ok=True)
         profile_dir.chmod(0o700)
+        stored = self.load_settings(profile_dir)
+        # 명시한 값 > 저장된 값 > 세션 기본값. 저장된 값도 다시 검증해 손상된 파일이 실행을 깨지 않게 한다.
+        policy = options.get("media_policy", self.config.media_policy)
+        if policy not in {"defer", "allow"}:
+            raise BrowserError("INVALID_ARGUMENT", "media_policy는 defer 또는 allow입니다.")
+        viewport = options.get("viewport", stored.get("viewport") or {"width": self.config.width, "height": self.config.height})
+        if not isinstance(viewport, dict) or any(type(viewport.get(k)) is not int or not 240 <= viewport[k] <= 7680 for k in ("width", "height")):
+            raise BrowserError("INVALID_ARGUMENT", "화면 너비/높이는 240~7680 정수입니다.")
+        viewport = {"width": viewport["width"], "height": viewport["height"]}
+        mobile = options.get("mobile", stored.get("mobile", self.config.mobile))
+        scale = options.get("device_scale_factor", stored.get("device_scale_factor", 1))
+        if not isinstance(mobile, bool):
+            raise BrowserError("INVALID_ARGUMENT", "mobile은 true/false입니다.")
+        if not isinstance(scale, (int, float)) or isinstance(scale, bool) or not 0.5 <= scale <= 4:
+            raise BrowserError("INVALID_ARGUMENT", "device_scale_factor는 0.5~4 사이의 수입니다.")
+        try:
+            locale = validate_locale(options.get("locale", stored.get("locale", self.config.locale)))
+            timezone_id = validate_timezone(options.get("timezone_id", stored.get("timezone_id", self.config.timezone_id)))
+        except BrowserError as error:
+            if "locale" in options or "timezone_id" in options:
+                raise
+            # 저장된 값이 잘못됐으면(손상된 파일) 무시하고 세션 기본값으로 연다.
+            locale = validate_locale(self.config.locale)
+            timezone_id = validate_timezone(self.config.timezone_id)
+            self.emit("profile_settings_ignored", profile=name, reason=str(error))
+        settings = {"locale": locale, "timezone_id": timezone_id, "viewport": viewport, "mobile": mobile,
+                    "device_scale_factor": scale, "media_policy": policy}
+        options = {**options, "mobile": mobile, "device_scale_factor": scale, "locale": locale, "timezone_id": timezone_id}
         # 비정상 종료가 남긴 잠금은 복구하고, 살아 있는 프로세스의 잠금은 충돌로 보고한다.
         lock = processes.release_stale_lock(profile_dir)
         if lock["present"] and not lock["stale"]:
@@ -224,6 +329,8 @@ class Engine:
         self.allowed[name] = set()
         self.policies[name] = policy
         self.profile_dirs[name] = profile_dir
+        self.settings[name] = settings
+        self.save_settings(profile_dir, settings)
         context.set_default_timeout(self.config.timeout_ms)
         for script in ("media.js", "activity.js"):
             await context.add_init_script(script=Path(__file__).with_name(script).read_text(encoding="utf-8"))
@@ -238,7 +345,66 @@ class Engine:
             self._attach(name, page)
         if not context.pages:
             await context.new_page()
-        return {"profile": name, "persistent": True, "media_policy": policy, "tabs": await self.list_tabs()}
+        await self._describe_runtime(context, profile_dir)
+        return {"profile": name, "persistent": True, "media_policy": policy, "settings": settings,
+                "locale": locale, "timezone_id": timezone_id, "tabs": await self.list_tabs()}
+
+    def announce_runtime(self) -> dict | None:
+        """첫 응답에는 runtime 전체를, 이후에는 반복 payload를 줄이기 위해 `{runtime_id}`만 돌려준다."""
+        if not self.runtime:
+            return None
+        if not self.runtime_announced:
+            self.runtime_announced = True
+            return self.runtime
+        return {"runtime_id": self.runtime["runtime_id"]}
+
+    async def _describe_runtime(self, context: BrowserContext, profile_dir: Path) -> None:
+        """실제 실행 엔진을 프로세스 기준으로 확인해 `runtime`을 채운다(v0.3.0).
+
+        실행 파일 이름(launcher)만으로 엔진을 추정하지 않는다. CDP `Browser.getVersion`이 돌려주는 제품 문자열
+        (`Chrome/146.0.7680.80`, `HeadlessChrome/153.0.8010.12`)에서 버전을 읽고, Linux에서는 브라우저 주 프로세스의
+        `/proc/<pid>/exe`로 실제 실행 파일을 확인한다. `sandbox_active`는 "--no-sandbox 없이 정상 시작했다"는 사실에서
+        오고(Chromium은 사용 가능한 샌드박스가 없으면 시작하지 못한다), 렌더러의 Seccomp 필터 상태를 `sandbox_evidence`로
+        덧붙인다(실행 직후라 렌더러가 아직 없으면 null).
+        """
+        info = dict(self.browser_info or {})
+        # 같은 실행 파일/종류면 프로필마다 다시 조사하지 않는다(프로필마다 Chromium 프로세스는 따로지만 엔진은 같다).
+        if self.runtime and self.runtime.get("executable") == info.get("executable") and self.runtime.get("kind") == info.get("kind"):
+            return
+        product = user_agent = None
+        try:
+            page = context.pages[0] if context.pages else await context.new_page()
+            session = await context.new_cdp_session(page)
+            try:
+                version = await asyncio.wait_for(session.send("Browser.getVersion"), 5)
+            finally:
+                await session.detach()
+            product = version.get("product")
+            user_agent = version.get("userAgent")
+        except (PlaywrightError, asyncio.TimeoutError):
+            pass
+        resolved = None
+        if sys.platform.startswith("linux"):
+            for process in processes.chromium_processes(profile_dir):
+                if process["type"] == "browser":
+                    try:
+                        resolved = os.readlink(f"/proc/{process['pid']}/exe")
+                    except OSError:
+                        resolved = None
+                    break
+        evidence = sandbox.seccomp_evidence(profile_dir) if sys.platform.startswith("linux") else None
+        self.runtime = {
+            "runtime_id": "rt" + hashlib.sha1(f"{info.get('executable')}|{product}".encode()).hexdigest()[:6],
+            "kind": info.get("kind"), "product": product,
+            "version": product.split("/", 1)[1] if product and "/" in product else sandbox.chromium_version(info.get("executable")),
+            "executable": info.get("executable"), "resolved_executable": resolved or info.get("executable"),
+            "fallback_from": info.get("fallback_from"), "sandbox_active": not self.config.no_sandbox,
+            "sandbox_source": "none" if self.config.no_sandbox else "setuid_helper" if info.get("sandbox_helper") else "namespace_or_profile",
+            "sandbox_evidence": {"seccomp_filtered": evidence["seccomp_filtered"]} if evidence else None,
+            "headless": self.config.headless, "user_agent": user_agent,
+        }
+        self.browser_info = {**info, "version": self.runtime["version"], "product": product,
+                             "resolved_executable": self.runtime["resolved_executable"], "runtime_id": self.runtime["runtime_id"]}
 
     def launch_candidates(self) -> list[dict]:
         """Config.browser 정책에 따라 시도할 실행 파일 후보를 우선순위대로 만든다.
@@ -286,10 +452,15 @@ class Engine:
                     viewport=viewport, is_mobile=options.get("mobile", self.config.mobile),
                     has_touch=options.get("mobile", self.config.mobile),
                     device_scale_factor=options.get("device_scale_factor", 1),
+                    locale=options.get("locale"), timezone_id=options.get("timezone_id"),
                     accept_downloads=True, service_workers="block" if policy == "defer" else "allow",
                     args=["--autoplay-policy=user-gesture-required"], env=env,
                 )
             except PlaywrightError as error:
+                # 시간대/로캘 거부는 샌드박스 문제가 아니라 잘못된 인수다(tz 데이터가 없는 호스트의 문법 검사 보완).
+                if "timezone" in str(error).lower() and options.get("timezone_id"):
+                    raise BrowserError("INVALID_ARGUMENT", "Chromium이 timezone_id를 거부했습니다.", timezone_id=options.get("timezone_id"),
+                                       reason=sandbox.significant_line(str(error))) from error
                 # 같은 "sandboxing failed" 메시지라도 root 실행과 AppArmor 제한을 구분해 돌려준다.
                 browser_error = sandbox.launch_error(str(error), sandbox.launch_context(executable))
                 tried.append({"kind": candidate["kind"], "executable": executable, "code": browser_error.code})
@@ -522,6 +693,7 @@ class Engine:
         self.allowed.pop(profile, None)
         self.policies.pop(profile, None)
         self.profile_dirs.pop(profile, None)
+        self.settings.pop(profile, None)
         remaining = await processes.wait_for_exit(profile_dir, timeout=3)
         forced = processes.terminate([p["pid"] for p in remaining]) if remaining else None
         lock = processes.release_stale_lock(profile_dir)

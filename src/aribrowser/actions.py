@@ -13,6 +13,11 @@ v0.2.0의 `navigate`는 네 번째 단계 `content_ready`를 추가한다. `load
 본문 텍스트·스켈레톤·보안 문자·로그인 폼 신호로 페이지가 실제 내용을 담았는지 판정하고,
 빈 껍데기(`empty`)는 한 번 새로 고쳐 재시도한 뒤에도 비어 있으면 `PAGE_EMPTY`, 차단은
 `PAGE_BLOCKED` 오류로 돌려준다. `include`로 레코드/상품/상태를 같은 응답에 실어 왕복을 줄인다.
+
+v0.3.0의 `navigate`는 `mode="minimal"`을 추가한다. 사이트 구조를 이미 아는 Agent가 `include`로 구조화
+결과만 원할 때 요약(영역/제목/역할 수/검색창)과 관측 자체를 생략하고 URL·제목·HTTP 상태·readiness·
+verification·include 결과·오류·budget만 돌려준다. 실행 엔진 정보(`runtime`)는 첫 응답에 전체를, 이후에는
+`runtime_id`만 싣는다.
 """
 
 import asyncio
@@ -23,8 +28,10 @@ from urllib.parse import urlparse
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
+from .budget import budget_report, measure, parse_limits
 from .errors import BrowserError
 from .readiness import HINTS, assess, parse_ready
+from .summary import minimal_view
 from .waiting import baseline_of, parse_conditions, parse_timeout, wait_for
 
 ELEMENT_ACTIONS = {"click", "open_link", "double_click", "hover", "fill", "type", "clear", "check",
@@ -162,11 +169,16 @@ async def navigate(browser, url: str, tab_id: str | None = None, **options) -> d
     if not browser.tabs:
         await browser.create_profile()
     tab = browser.get_tab(tab_id)
+    mode = options.get("mode", "summary")
+    if not isinstance(mode, str):
+        raise BrowserError("INVALID_ARGUMENT", "mode는 문자열입니다.")
     expect, timeout_ms = parse_expect(options, browser.config.timeout_ms)
     ready = parse_ready(options, browser.config.timeout_ms)
     include = parse_include(options)
     settle_ms = options.get("settle_ms", 150)
-    if tab.previous is None:
+    limits = parse_limits(options, browser.config.max_bytes)
+    # minimal 모드는 관측(DOM 수집)을 아예 하지 않으므로 탐색 전 기준선도 잡지 않는다. 변경 비교는 다음 관측에서 새로 시작한다.
+    if tab.previous is None and mode != "minimal":
         tab.previous = await browser.observe(tab)
     baseline = baseline_of(browser, tab)
     load_timeout = 2000 if ready is not None else 10000
@@ -200,13 +212,24 @@ async def navigate(browser, url: str, tab_id: str | None = None, **options) -> d
                            readiness=readiness, verification=verification, hint=readiness.get("hint"),
                            recovery="응답은 오류지만 탭에는 현재 문서가 남아 있습니다. snapshot/query로 내용을 확인할 수 있습니다.")
     await verify_expectation(browser, tab, expect, timeout_ms, baseline, verification)
-    view = view_options(options)
-    if options.get("mode", "summary") == "summary" and readiness:
-        view["kind"] = readiness.get("kind")
-    result = await browser.snapshot(tab.id, mode=options.get("mode", "summary"), **view)
-    result["verification"] = verification
-    if readiness:
-        result["readiness"] = readiness
+    if mode == "minimal":
+        try:
+            title = await asyncio.wait_for(tab.page.title(), 2)
+        except Exception:
+            title = ""
+        page = {"url": tab.page.url, "title": title, "http_status": outcome["http_status"]}
+        result = minimal_view(page, readiness, verification, browser.activity_view(baseline["sequence"], tab.id))
+        # 요약 관측을 생략했으므로 다음 관측(action/snapshot)이 새 기준선을 잡게 한다.
+        tab.previous = None
+        tab.event_cursor = browser.sequence
+    else:
+        view = view_options(options)
+        if mode == "summary" and readiness:
+            view["kind"] = readiness.get("kind")
+        result = await browser.snapshot(tab.id, mode=mode, **view)
+        result["verification"] = verification
+        if readiness:
+            result["readiness"] = readiness
     # include: 같은 응답에 레코드/상품/상태를 실어 왕복을 줄인다. 각 조회는 자체 예산을 가진다.
     if "records" in include:
         result["records"] = await browser.extract(tab.id, **options.get("extract", {}))
@@ -216,6 +239,14 @@ async def navigate(browser, url: str, tab_id: str | None = None, **options) -> d
         result["state"] = await browser.page_state(tab.id)
     if "events" in include and "events" not in result:
         result["events"] = browser.event_view(baseline["sequence"])["events"]
+    runtime = browser.announce_runtime()
+    if runtime:
+        result["runtime"] = runtime
+    if mode == "minimal":
+        result["budget"] = budget_report(result, limits, 0, False)
+    else:
+        # include/readiness/runtime를 더한 뒤의 실제 크기로 갱신해 budget.bytes가 응답 전체를 뜻하게 한다(v0.3.0).
+        result["budget"].update(measure(result))
     return result
 
 

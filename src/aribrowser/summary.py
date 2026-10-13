@@ -8,6 +8,10 @@
 
 v0.2.0: 오류 이벤트의 URL은 호스트+경로로 축약하고 종류별 개수로 접어 추적용 긴 URL이
 토큰을 낭비하지 않게 했다. `kind`(페이지 종류 추정)에 따라 다음 명령 추천을 바꾼다.
+
+v0.3.0: `minimal_view`가 `navigate(mode="minimal")` 응답을 만든다. 영역/제목/역할 수/검색창/활동 집계를
+빼고 페이지 식별·readiness 근거·verification·오류만 남긴다. 구조화 include만 원하는 Agent의 고정
+오버헤드를 줄이되 readiness와 오류 진단 능력은 유지한다(정확성 우선).
 """
 
 from collections import Counter
@@ -116,3 +120,40 @@ def page_summary(state: dict, events: list[dict], options: dict | None = None, k
             "next": NEXT_BY_KIND.get(kind or "other", NEXT_BY_KIND["other"]),
         },
     }
+
+
+# minimal 응답의 readiness에서 항상 싣는 키. signals/probe는 ready가 아닐 때만(근거가 필요할 때만) 싣는다.
+READINESS_KEYS = ("status", "reasons", "kind", "waited_ms", "attempts", "hint")
+# minimal 응답의 errors.event_counts에 세는 오류성 이벤트 종류.
+ERROR_TYPES = {"network_failed", "not_found", "authentication_required", "server_error", "http_error",
+               "script_error", "browser_crashed", "download_failed", "background_error"}
+
+
+def compact_readiness(readiness: dict) -> dict:
+    """readiness 블록을 최소 형태로 줄인다. 실패 상태에서는 신호 전체를 남겨 원인을 볼 수 있게 한다."""
+    compact = {key: readiness[key] for key in READINESS_KEYS if key in readiness}
+    if readiness.get("status") != "ready":
+        compact["signals"] = readiness.get("signals")
+    if readiness.get("probe") is not None:
+        compact["probe"] = readiness["probe"]
+    return compact
+
+
+def minimal_view(page: dict, readiness: dict | None, verification: dict, activity: dict) -> dict:
+    """`navigate(mode="minimal")`의 본문: URL/제목/HTTP 상태, readiness, verification, 오류(있을 때만), cursor.
+
+    활동 집계는 싣지 않지만 오류성 이벤트가 있으면 종류별 개수와 축약 URL 몇 건을 `errors`에 남긴다.
+    """
+    result = {"page": page, "verification": verification}
+    if readiness:
+        result["readiness"] = compact_readiness(readiness)
+    errors = {}
+    if (page.get("http_status") or 0) >= 400:
+        errors["http_status"] = page["http_status"]
+    if activity.get("errors_total"):
+        errors["event_counts"] = {kind: count for kind, count in activity["by_type"].items() if kind in ERROR_TYPES}
+        errors["events"] = activity["errors"][:3]
+    if errors:
+        result["errors"] = errors
+    result["cursor"] = activity["cursor"]
+    return result

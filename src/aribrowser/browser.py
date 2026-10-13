@@ -11,6 +11,10 @@ v0.2.0 추가:
 - 상품 상세 페이지 요약(`page.product`, product.js)과 로딩 품질 신호(readiness.js) 실행.
 - 관측 응답의 이벤트 원문을 종류별 집계(`activity`)로 바꾸고 `include_events=true`일 때만 원문을 싣는다.
 - `extract`의 자동 필드 확장(sold/rating/reviews/original_price/discount)과 품질 지표(`quality`).
+
+v0.3.0 추가:
+- 필드 명세 확장(`source=self`, `relation=closest`/`closest`, `canonical`/`stable_id`)과 `explain` 옵션 검증.
+- `extract`/`query` 응답의 `dedupe` 통계(null 키 보존)와 확장된 `quality`를 그대로 전달한다.
 """
 
 import asyncio
@@ -59,9 +63,15 @@ MATCH_MODES = {"contains", "exact", "regex", "prefix"}
 SEARCH_FIELDS = {"name", "text", "value", "href", "description"}
 SORT_KEYS = {"document", "name", "role", "position"}
 QUERY_FIELDS = {"id", "tag", "text", "name", "role", "href", "src", "value", "visible", "classes", "bounds", "price", "number",
-                "attributes", "sold", "rating", "reviews", "discount"}
+                "attributes", "sold", "rating", "reviews", "discount", "recent_sales"}
 ATTRIBUTE_NAME = re.compile(r"^[A-Za-z_:][-A-Za-z0-9_:.]{0,99}$")
-RECORD_TYPES = {"text", "number", "price", "url", "count", "rating"}
+# v0.3.0: sold/recent_sales/reviews/discount/shipping 해석기를 지정 필드 type으로도 쓸 수 있다.
+RECORD_TYPES = {"text", "number", "price", "url", "count", "rating", "sold", "recent_sales", "reviews", "discount", "shipping"}
+# 지정 필드 명세의 허용 키(v0.3.0: source/relation/closest/canonical/stable_id 추가).
+RECORD_SPEC_KEYS = {"selector", "source", "attr", "type", "all", "regex", "relation", "closest", "canonical", "stable_id"}
+# 레코드 필드의 누락 사유(v0.3.0 세분화). capabilities로 공개한다.
+MISSING_REASONS = ["selector_no_match", "relation_no_match", "attribute_empty", "text_empty", "regex_no_match", "parse_failed",
+                   "unsupported_locale_pattern"]
 
 
 def _validate_selector(value, name: str = "selector") -> str:
@@ -603,6 +613,8 @@ class Browser(Engine):
                   "duplicates_removed": data["duplicates_removed"], "offset": offset,
                   "next_offset": limited["next_offset"] if limited["truncated"] else data["next_offset"],
                   "omitted": max(0, data["matched"] - offset - len(selected)), "frame": params["prefix"]}
+        if data.get("dedupe"):
+            result["dedupe"] = data["dedupe"]
         result["budget"] = budget_report(result, limits, len(selected), limited["truncated"], limited["truncated_by"],
                                          limited["next_offset"], limited["oversized"])
         return result
@@ -622,14 +634,27 @@ class Browser(Engine):
                 if isinstance(spec, str):
                     _validate_selector(spec, f"fields.{name}")
                     continue
-                if not isinstance(spec, dict) or set(spec) - {"selector", "attr", "type", "all", "regex"}:
-                    raise BrowserError("INVALID_ARGUMENT", f"fields.{name}은 selector/attr/type/all/regex 명세입니다.")
-                if "selector" in spec:
+                if not isinstance(spec, dict) or set(spec) - RECORD_SPEC_KEYS:
+                    raise BrowserError("INVALID_ARGUMENT", f"fields.{name}은 {'/'.join(sorted(RECORD_SPEC_KEYS))} 명세입니다.",
+                                       allowed=sorted(RECORD_SPEC_KEYS))
+                if "selector" in spec and spec["selector"] not in {":self", ":scope"}:
                     _validate_selector(spec["selector"], f"fields.{name}.selector")
+                if "source" in spec and spec["source"] != "self":
+                    raise BrowserError("INVALID_ARGUMENT", f"fields.{name}.source는 self만 지원합니다(레코드 요소 자체).")
+                if "relation" in spec and spec["relation"] != "closest":
+                    raise BrowserError("INVALID_ARGUMENT", f"fields.{name}.relation은 closest만 지원합니다.")
+                if "closest" in spec:
+                    _validate_selector(spec["closest"], f"fields.{name}.closest")
+                if "canonical" in spec and spec["canonical"] not in (True, False, "compact"):
+                    raise BrowserError("INVALID_ARGUMENT", f"fields.{name}.canonical은 true/false 또는 \"compact\"입니다.")
+                if "stable_id" in spec and (not isinstance(spec["stable_id"], str) or not 1 <= len(spec["stable_id"]) <= 500):
+                    raise BrowserError("INVALID_ARGUMENT", f"fields.{name}.stable_id는 안정 식별자를 뽑는 정규식(500자 이하)입니다.")
+                if ("canonical" in spec or "stable_id" in spec) and spec.get("type") != "url":
+                    raise BrowserError("INVALID_ARGUMENT", f"fields.{name}.canonical/stable_id는 type=url에서만 쓸 수 있습니다.")
                 if "attr" in spec and (not isinstance(spec["attr"], str) or not ATTRIBUTE_NAME.match(spec["attr"])):
                     raise BrowserError("INVALID_ARGUMENT", f"fields.{name}.attr은 HTML 속성 이름입니다.")
                 if "type" in spec and spec["type"] not in RECORD_TYPES:
-                    raise BrowserError("INVALID_ARGUMENT", f"fields.{name}.type은 text/number/price/url/count/rating입니다.")
+                    raise BrowserError("INVALID_ARGUMENT", f"fields.{name}.type은 {'/'.join(sorted(RECORD_TYPES))}입니다.", allowed=sorted(RECORD_TYPES))
                 if "all" in spec and not isinstance(spec["all"], bool):
                     raise BrowserError("INVALID_ARGUMENT", f"fields.{name}.all은 true/false입니다.")
                 if "regex" in spec and (not isinstance(spec["regex"], str) or len(spec["regex"]) > 500):
@@ -638,11 +663,14 @@ class Browser(Engine):
             raise BrowserError("INVALID_ARGUMENT", "match는 contains/exact/regex/prefix입니다.")
         offset, limit = _validate_pagination(options, 50, 1000)
         dedupe = options.get("dedupe", False)
-        if dedupe not in (True, False) and not (isinstance(dedupe, list) and all(isinstance(k, str) for k in dedupe)):
+        if dedupe not in (True, False) and not (isinstance(dedupe, list) and dedupe and all(isinstance(k, str) for k in dedupe)):
             raise BrowserError("INVALID_ARGUMENT", "dedupe는 true 또는 필드 이름 배열입니다.")
+        explain = options.get("explain", False)
+        if not isinstance(explain, bool):
+            raise BrowserError("INVALID_ARGUMENT", "explain은 true/false입니다.")
         params = {"mode": "records", "item": item, "fields": fields, "text": options.get("text"),
                   "match": options.get("match", "contains"), "includeHidden": bool(options.get("include_hidden", False)),
-                  "offset": offset, "limit": limit, "dedupe": dedupe, "maxText": options.get("max_text", 500),
+                  "offset": offset, "limit": limit, "dedupe": dedupe, "maxText": options.get("max_text", 500), "explain": explain,
                   **self._scope_params(tab, options.get("container"))}
         if type(params["maxText"]) is not int or not 1 <= params["maxText"] <= 20000:
             raise BrowserError("INVALID_ARGUMENT", "max_text는 1~20000 정수입니다.")
@@ -656,11 +684,20 @@ class Browser(Engine):
             quality["hint"] = ("레코드를 찾지 못했습니다. container/item 선택자를 지정하거나 snapshot(mode=main)으로 구조를 확인하세요."
                                if quality["confidence"] == "none" else
                                "자동 감지 결과의 필드 커버리지가 낮습니다. detection.candidates의 다른 컨테이너를 container로 지정하거나 item/fields 선택자를 지정하세요.")
+        # 지정 필드가 어느 레코드에서도 요소를 찾지 못했으면 선택자 문제다. 해석 실패(parse)와 구분해 안내한다.
+        missing_all = [name for name, reasons in (quality.get("missing") or {}).items()
+                       if reasons.get("selector_no_match") == data["total"] and data["total"]]
+        if missing_all and fields:
+            quality["hint"] = (f"필드 {', '.join(missing_all)}의 선택자가 모든 레코드에서 요소를 찾지 못했습니다. "
+                               "레코드 자체를 읽으려면 {source: \"self\"}, 제목을 감싸는 링크는 {type: \"url\", relation: \"closest\"}를 쓰고, "
+                               "explain=true로 선택자 일치 수와 원문을 확인하세요.")
         result = {"records": selected, "total": data["total"], "matched": data["matched"],
                   "duplicates_removed": data["duplicates_removed"], "detection": data["detection"], "quality": quality,
                   "offset": offset, "next_offset": limited["next_offset"] if limited["truncated"] else data["next_offset"],
                   "omitted": max(0, data["matched"] - offset - len(selected)), "frame": params["prefix"],
                   "missing_fields": sum(1 for r in selected if r.get("missing"))}
+        if data.get("dedupe"):
+            result["dedupe"] = data["dedupe"]
         result["budget"] = budget_report(result, limits, len(selected), limited["truncated"], limited["truncated_by"],
                                          limited["next_offset"], limited["oversized"])
         return result

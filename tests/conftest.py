@@ -129,6 +129,43 @@ SHELL_CHROME = """<!doctype html><html><meta charset="utf-8"><title></title>
 <p>Browse by Category 인기 전체 제품 프로모션 저가 상품 리뷰 블로그 판매자 포털 앱 다운로드 파트너 제휴 프로그램 개인정보 처리방침 이용약관</p>
 <ul><li><a href="/a">a</a></li><li><a href="/b">b</a></li><li><a href="/c">c</a></li><li><a href="/d">d</a></li><li><a href="/e">e</a></li><li><a href="/f">f</a></li></ul></div>
 <script>for (let i = 0; i < 80; i++) document.querySelector('#root > div').appendChild(document.createElement('span'));</script></html>"""
+# v0.3.0 검증용 페이지.
+# AMAZON: Amazon 한국어 검색 결과를 본뜬 카드. 링크가 h2를 감싸는 구조, 최댓값이 먼저 나오는 평점("별 5개 중 4.3개"),
+# 최근 월 구매 배지, 추적 매개변수가 붙은 상품 URL(같은 ASIN을 다른 추적값으로 두 번), 링크가 없는 카드, h2 안에 링크가 있는 카드.
+def amazon_card(index: int, asin: str, title: str, rating: str, reviews: str, recent: str | None, price: str, link: str = "outer") -> str:
+    """카드 HTML 하나를 만든다. link=outer: <a><h2>, inner: <h2><a>, none: 링크 없음."""
+    heading = f'<h2 class="a-size-base"><span>{title}</span></h2>'
+    if link == "outer":
+        heading = f'<a class="a-link-normal" href="/dp/{asin}/ref=sr_1_{index}?dib=eyJ2IjoiMSJ9&amp;keywords=amp&amp;qid=17600{index}&amp;sr=8-{index}">{heading}</a>'
+    elif link == "inner":
+        heading = f'<h2 class="a-size-base"><a class="a-link-normal" href="/dp/{asin}?th=1&amp;psc=1"><span>{title}</span></a></h2>'
+    badge = f'<span class="recent">{recent}</span>' if recent else ""
+    return (f'<div class="s-result-item" data-asin="{asin}"><div class="brand">AriSound</div>{heading}'
+            f'<div class="rating"><span class="a-icon-alt">{rating}</span><span class="rc">{reviews}</span></div>{badge}'
+            f'<div class="a-price"><span class="a-offscreen">{price}</span></div><img src="/one.png" alt="{title}"></div>')
+
+
+AMAZON_CARDS = [
+    amazon_card(1, "B07W3K92ZM", "Valeton Rushead Max 기타 헤드폰 앰프", "별 5개 중 4.3개", "3,900", "지난달 100개 이상 구매", "₩45,524"),
+    amazon_card(2, "B079FHY8PV", "SONICAKE Mini Guitar Headphone Amp", "4.1 out of 5 stars", "2,700", "50+ bought in past month", "₩40,226"),
+    amazon_card(3, "B079FGN89H", "SONICAKE US Madness 헤드폰 앰프", "5점 만점에 4.0점", "1,400", None, "₩37,543"),
+    amazon_card(4, "B084JB519R", "NUX Mighty Plug MP-2 모델 2.5", "별 5개 중 4.5개", "1,300", None, "₩52,000", link="inner"),
+    amazon_card(5, "B079FWQV3Z", "Donner Mini Guitar Headphone Amp", "별 5개 중 4.2개", "1,200", "최근 한 달간 50개 이상 구매", "₩45,591", link="none"),
+    amazon_card(6, "B07W3K92ZM", "Valeton Rushead Max 기타 헤드폰 앰프", "별 5개 중 4.3개", "3,900", "지난달 100개 이상 구매", "₩45,524"),
+] + [amazon_card(7 + i, f"B0FAKE{i:04d}", f"Generic Headphone Amp {i}", "별 5개 중 4.0개", "10", None, "₩30,000") for i in range(6)]
+AMAZON = ("""<!doctype html><html lang="ko"><meta charset="utf-8"><title>Amazon.com : electric guitar headphone amp</title>
+<link rel="canonical" href="/s?k=electric+guitar+headphone+amp">
+<header><nav><a href="/">홈</a><a href="/cart">장바구니</a></nav></header>
+<main><h1>결과</h1><div class="s-main-slot">""" + "".join(AMAZON_CARDS) + """</div></main>
+<footer><a href="/help">도움말</a></footer></html>""")
+
+# ECHO: 요청의 Accept-Language 헤더(서버 삽입)와 navigator.language, Intl 시간대를 보여 주는 페이지(로캘/시간대 검증).
+ECHO = """<!doctype html><html><meta charset="utf-8"><title>echo</title><main><h1>환경 확인</h1>
+<p>accept-language: <span id="al">ACCEPT_LANGUAGE</span></p><p>navigator.language: <span id="nl"></span></p>
+<p>timezone: <span id="tz"></span></p><p>offset: <span id="off"></span></p><p>본문 """ + "내용 " * 40 + """</p></main>
+<script>document.querySelector('#nl').textContent = navigator.language; document.querySelector('#tz').textContent = Intl.DateTimeFormat().resolvedOptions().timeZone;
+document.querySelector('#off').textContent = String(new Date(Date.UTC(2026, 0, 1, 12)).getHours());</script></html>"""
+
 BLOCKED = """<!doctype html><html><meta charset="utf-8"><title>Verify</title><p>Please verify you are human</p><iframe src="/captcha/_____tmd_____/punish" style="width:300px;height:200px"></iframe></html>"""
 LOGIN = """<!doctype html><html lang="ko"><meta charset="utf-8"><title>로그인</title><form><label>아이디 <input name="id"></label><label>비밀번호 <input type="password" name="pw"></label><button>로그인</button></form></html>"""
 
@@ -161,6 +198,12 @@ def site():
                 body = SHELL_EMPTY.encode()
             elif self.path == "/shell-chrome":
                 body = SHELL_CHROME.encode()
+            elif self.path.startswith("/amazon"):
+                body = AMAZON.encode()
+            elif self.path.startswith("/dp/"):
+                body = ('<title>상품</title><h1>' + self.path + '</h1><p>' + '내용 ' * 40 + '</p>').encode()
+            elif self.path == "/echo":
+                body = ECHO.replace("ACCEPT_LANGUAGE", self.headers.get("Accept-Language", "")).encode()
             elif self.path == "/blocked":
                 body = BLOCKED.encode()
             elif self.path == "/forbidden":

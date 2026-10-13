@@ -1,4 +1,4 @@
-# AriBrowser 0.2.0
+# AriBrowser 0.3.0
 
 웹페이지를 실제 Chromium으로 실행한 뒤, AI Agent가 읽고 조작할 수 있는 **요약·텍스트 화면·짧은 요소 ID**로 제공합니다. 기본 출력에 이미지가 포함되지 않으며, 필요한 요소·차트·지도·영역만 PNG로 요청할 수 있습니다.
 
@@ -9,28 +9,32 @@ Chromium → DOM + Chromium 접근성 트리 + 계산된 레이아웃
          → 짧은 ID 기반 조작 → 전달·수신·기대 상태 검증 + 변경분 + 활동 집계
 ```
 
+0.3.0은 Amazon 벤치마크 후속 요구사항을 반영했습니다. 프로필의 로캘·시간대를 고정해 결과를 재현할 수 있고, `별 5개 중 4.3개` 같은 한국어 평점과 `지난달 100개 이상 구매` 같은 최근 구매량을 구조화하며, 중복 제거 키가 비어 있어도 레코드를 잃지 않고 `quality`가 손실을 경고합니다. `navigate(mode="minimal")`은 요약을 빼고 구조화 결과만 돌려주고, 제목을 감싸는 링크·추적 매개변수가 붙은 URL(`canonical`, `stable_id`)·레코드 자체 텍스트(`source: "self"`)·해석 실패 원인(`explain`)을 다루며, 첫 응답의 `runtime`이 실제 실행 엔진과 샌드박스 상태를 알립니다. Linux는 `.deb` 패키지로 설치하면 샌드박스 도우미까지 함께 설치됩니다.
+
 0.2.0은 Agent가 **더 적은 토큰으로 더 빨리** 웹 검색 목표를 달성하는 데 집중했습니다. 탐색 응답에서 네트워크 이벤트 URL을 빼고 집계만 남겼고, 빈 껍데기나 보안 문자 페이지는 성공으로 보고하지 않고 `PAGE_EMPTY`/`PAGE_BLOCKED`로 근거와 함께 돌려줍니다. 탐색 한 번에 레코드·상품 요약·정렬 상태를 함께 받을 수 있고(`include`, `batch`), 붙어 출력되는 가격·판매량 텍스트를 해석기가 처리하며, 상품 상세는 `page.product` 한 번으로 요약됩니다. 샌드박스는 호스트당 한 번만 설치하면 설치 경로와 무관하게 동작하고, 설치된 Chrome/Chromium이 있으면 설치 없이 바로 씁니다. 자세한 변경은 [버전 이력](CHANGELOG.md)에 있습니다.
 
 ## 실행 파일
 
-[Releases](https://github.com/zzabisagent-lab/AriBrowser/releases/tag/v0.2.0)에서 운영체제에 맞는 압축 파일을 받으세요. Python·Node.js를 별도로 설치할 필요가 없으며 Chromium이 포함됩니다. 압축을 **전체** 해제한 뒤 `aribrowser` 폴더 안의 실행 파일을 사용합니다. `_internal` 폴더도 함께 유지해야 합니다.
+[Releases](https://github.com/zzabisagent-lab/AriBrowser/releases/tag/v0.3.0)에서 운영체제에 맞는 압축 파일을 받으세요. Python·Node.js를 별도로 설치할 필요가 없으며 Chromium이 포함됩니다. 압축을 **전체** 해제한 뒤 `aribrowser` 폴더 안의 실행 파일을 사용합니다. `_internal` 폴더도 함께 유지해야 합니다.
 
 | 운영체제 | 배포 파일 | 실행 파일 |
 | --- | --- | --- |
-| Linux x64 | `aribrowser-0.2.0-linux-x64.tar.gz` | `./aribrowser` |
-| Windows x64 | `aribrowser-0.2.0-windows-x64.zip` | `aribrowser.exe` |
-| macOS Apple Silicon | `aribrowser-0.2.0-macos-arm64.tar.gz` | `./aribrowser` |
-| macOS Intel | `aribrowser-0.2.0-macos-x64.tar.gz` | `./aribrowser` |
+| Linux x64 (tarball) | `aribrowser-0.3.0-linux-x64.tar.gz` | `./aribrowser` |
+| Linux x64 (Debian/Ubuntu 패키지) | `aribrowser_0.3.0_amd64.deb` | `aribrowser` (`/usr/bin`, 설치 시 샌드박스 도우미 포함) |
+| Windows x64 | `aribrowser-0.3.0-windows-x64.zip` | `aribrowser.exe` |
+| macOS Apple Silicon | `aribrowser-0.3.0-macos-arm64.tar.gz` | `./aribrowser` |
+| macOS Intel | `aribrowser-0.3.0-macos-x64.tar.gz` | `./aribrowser` |
 
 Linux는 Ubuntu 22.04 이상 및 Chromium 시스템 라이브러리가 필요합니다. macOS 15/Windows Server 2022에서 네이티브 빌드·검증합니다. macOS Developer ID 공증과 Windows Authenticode 서명은 포함하지 않습니다. 배포 파일 옆의 `.sha256`으로 무결성을 확인할 수 있습니다.
 
 ```bash
+sudo apt install ./aribrowser_0.3.0_amd64.deb   # Debian/Ubuntu: 설치와 함께 샌드박스 도우미 설치(권장)
 ./aribrowser --version
 ./aribrowser --doctor                  # 실행 환경 진단 (Chromium/사용자/AppArmor/도우미/시스템 브라우저/샌드박스/프로세스)
 sudo ./aribrowser --install-sandbox    # Ubuntu 24.04+: 공용 샌드박스 도우미를 호스트당 한 번 설치 + 검증
 ./aribrowser --self-test
 ./aribrowser --snapshot https://example.com --format text
-./aribrowser --data-dir ./my-agent-profile --max-bytes 300000
+./aribrowser --data-dir ./my-agent-profile --max-bytes 300000 --locale en-US --timezone UTC
 ```
 
 마지막 명령은 JSONL 세션을 시작합니다. 표준입력의 JSON 한 줄마다 표준출력에 JSON 한 줄을 반환합니다. 이미지·다운로드·쿠키 저장소는 `--data-dir` 아래에 유지됩니다. 기본 위치는 사용자 홈의 `.aribrowser`입니다. `--max-bytes`는 관측 응답의 세션 기본 상한(기본 500,000바이트)이며 요청마다 `max_bytes`/`max_elements`/`max_tokens`로 바꿀 수 있습니다.
@@ -50,6 +54,7 @@ Ubuntu 23.10 이상에서 `Chromium sandboxing failed!`가 나오면 `--doctor`�
 {"id":3,"command":"action","params":{"action":"fill","element":"t1e12","text":"AriBrowser"}}
 {"id":4,"command":"action","params":{"action":"press","element":"t1e12","key":"Enter","expect":{"url_changed":true,"network_idle_ms":500}}}
 {"id":5,"command":"navigate","params":{"url":"https://…/search?q=아크릴","include":["records","state"],"extract":{"limit":20,"dedupe":true}}}
+{"id":5,"command":"navigate","params":{"url":"https://www.amazon.com/s?k=guitar+headphone+amp","mode":"minimal","include":["records"],"extract":{"item":"[data-asin]:not([data-asin=''])","limit":60,"fields":{"title":"h2","url":{"selector":"h2","type":"url","canonical":true},"price":{"selector":".a-price .a-offscreen","type":"price"},"rating":{"selector":".a-icon-alt","type":"rating"},"card":{"source":"self"}}}}}
 {"id":6,"command":"batch","params":{"steps":[{"command":"navigate","params":{"url":"https://…/item/1"}},{"command":"page.product","params":{}}]}}
 {"id":7,"command":"query","params":{"selector":".price","fields":["text","price","sold","rating"],"limit":50}}
 {"id":8,"command":"snapshot","params":{"mode":"main","format":"text","max_tokens":4000}}
@@ -78,7 +83,7 @@ python -m ruff check src tests scripts
 python scripts/build.py
 ```
 
-각 OS에서 `scripts/build.py`를 실행하면 Chromium 포함 배포 파일과 SHA-256이 `artifacts/`에 생성됩니다. 빌드 스크립트는 패키징한 바이너리로 `--doctor`와 `--self-test`를 실행해 실제 Chromium 실행을 검증하며, 호스트가 샌드박스를 지원하지 않을 때만 `--no-sandbox`로 재시도하고 그 사실을 출력합니다. GitHub Actions는 Linux·Windows·macOS ARM64·macOS Intel에서 통합 테스트와 빌드, 패키징한 바이너리의 실제 Chromium 실행을 검증하고, Ubuntu 24.04에서 샌드박스 정책 설치를 별도로 검증합니다. `main` 빌드가 모두 통과하면 해당 버전의 GitHub Release에 파일을 게시합니다.
+각 OS에서 `scripts/build.py`를 실행하면 Chromium 포함 배포 파일과 SHA-256이 `artifacts/`에 생성됩니다(Linux에서는 `dpkg-deb`가 있으면 `.deb`도 함께). 빌드 스크립트는 패키징한 바이너리로 `--doctor`와 `--self-test`를 실행해 실제 Chromium 실행을 검증하며, 호스트가 샌드박스를 지원하지 않을 때만 `--no-sandbox`로 재시도하고 그 사실을 출력합니다. GitHub Actions는 Linux·Windows·macOS ARM64·macOS Intel에서 통합 테스트와 빌드, 패키징한 바이너리의 실제 Chromium 실행을 검증하고, Ubuntu 24.04에서 샌드박스 정책 설치를 별도로 검증합니다. `main` 빌드가 모두 통과하면 해당 버전의 GitHub Release에 파일을 게시합니다.
 
 ## 운영 특성
 

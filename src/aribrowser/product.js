@@ -6,6 +6,7 @@
  * 1. 구조화 데이터: JSON-LD(schema.org Product/Offer/AggregateRating), 마이크로데이터(itemprop)
  * 2. 메타 태그: Open Graph(og:title/og:image), product:price:amount/currency, og:availability
  * 3. DOM 휴리스틱: h1, 가격 클래스/취소선 요소, 본문 텍스트의 판매량·평점·리뷰·배송 패턴
+ * v0.3.0: 기간 한정 구매량(recent_sales)과 canonical URL/안정 식별자(link rel=canonical 우선)를 추가했다.
  * 각 필드에 어떤 출처에서 읽었는지 `sources`로 남겨 Agent가 신뢰도를 판단할 수 있게 한다.
  *
  * 페이지 데이터를 읽기만 하며 변경하지 않는다. 쿠키·저장소·네트워크 API에는 접근하지 않는다.
@@ -137,6 +138,8 @@
   if (discount) set('discount', discount.percent, 'text');
   else if (product.original_price && product.price) set('discount', Math.round((1 - product.price.value / product.original_price.value) * 100), 'computed');
   set('sold', lib.parseSold(bodyText), 'text');
+  // 기간 한정 구매량(최근 월 구매 배지)은 누적 판매량과 구분해 따로 돌려준다(v0.3.0).
+  set('recent_sales', lib.parseRecentSales(bodyText), 'text');
   const rating = lib.parseRating(bodyText);
   if (rating) {
     set('rating', rating.value, 'text');
@@ -177,5 +180,10 @@
   const detected = !!(product.title && product.price);
   const confidence = !product.title ? 'none' : (sources.price === 'json-ld' || sources.price === 'microdata' || sources.price === 'meta') ? 'high' :
     product.price ? 'medium' : 'low';
-  return {detected, confidence, product, sources, url: location.href, structured_data: {json_ld: !!ld, microdata: !!scope, open_graph: !!meta('og:title')}};
+  // v0.3.0: 페이지가 선언한 canonical 링크를 우선하고, 없으면 현재 URL에서 추적 매개변수를 제거해 안정 식별자를 뽑는다.
+  const canonicalLink = document.querySelector('link[rel="canonical"]')?.href || null;
+  const canonical = lib.canonicalUrl(canonicalLink || location.href);
+  if (canonicalLink) canonical.source = 'link_canonical'; else canonical.source = 'url';
+  return {detected, confidence, product, sources, url: location.href, canonical_url: canonical.canonical, stable_id: canonical.stable_id,
+    canonical_source: canonical.source, structured_data: {json_ld: !!ld, microdata: !!scope, open_graph: !!meta('og:title')}};
 }

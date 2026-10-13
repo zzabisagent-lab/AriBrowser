@@ -11,6 +11,10 @@ max_bytes/max_elements/max_tokens 예산, `wait`/`action.expect`에는 SPA 대�
 v0.2.0 추가: `page.product`(상품 상세 요약), `batch`(여러 명령을 한 왕복에 순차 실행),
 `navigate`의 `ready`(로딩 품질 검증/재시도)·`include`(records/product/state/events)·`extract`,
 관측 응답의 `include_events`(기본 false: 이벤트 원문 대신 `activity` 집계).
+
+v0.3.0 추가: `profile.create`의 `locale`/`timezone_id`, `navigate`의 `mode="minimal"`, `extract`의 `explain`과
+확장 필드 명세(source/relation/closest/canonical/stable_id), `profile.list`의 적용 설정, `capabilities`의
+`runtime`(실제 실행 엔진)·`profile_settings`·`missing_reasons`·`record_field_spec`.
 """
 
 import asyncio
@@ -22,6 +26,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from . import __version__, processes, sandbox
 from .actions import ELEMENT_ACTIONS, PAGE_ACTIONS, act, navigate
+from .browser import MISSING_REASONS, QUERY_FIELDS, RECORD_SPEC_KEYS, RECORD_TYPES
 from .budget import ELEMENT_FIELDS, STATE_DEFAULTS, TOKENIZER
 from .errors import BrowserError
 from .render import load_media, render, request_resource
@@ -31,7 +36,7 @@ from .waiting import WAIT_KEYS, parse_conditions, parse_timeout, wait_for
 VIEW = {"format", "fields", "compact", "max_bytes", "max_elements", "max_tokens", "include_events"}
 # 명령별 허용 키를 공개해 Agent가 오타로 무시된 옵션을 성공으로 오인하지 않게 한다.
 COMMANDS = {
-    "capabilities": set(), "profile.create": {"name", "viewport", "mobile", "device_scale_factor", "media_policy"},
+    "capabilities": set(), "profile.create": {"name", "viewport", "mobile", "device_scale_factor", "media_policy", "locale", "timezone_id"},
     "profile.list": set(), "profile.close": {"name"},
     "tab.list": set(), "tab.new": {"profile", "url"}, "tab.switch": {"tab"}, "tab.close": {"tab"},
     "navigate": {"url", "tab", "mode", "settle_ms", "expect", "ready", "include", "extract", "limit", "offset", "include_hidden",
@@ -43,7 +48,7 @@ COMMANDS = {
     "query": {"tab", "frame", "selector", "scope", "fields", "attributes", "text", "match", "include_hidden", "offset",
               "limit", "dedupe", "max_text", "max_bytes", "max_elements", "max_tokens"},
     "extract": {"tab", "frame", "container", "item", "fields", "text", "match", "include_hidden", "offset", "limit",
-                "dedupe", "max_text", "max_bytes", "max_elements", "max_tokens"},
+                "dedupe", "max_text", "max_bytes", "max_elements", "max_tokens", "explain"},
     "page.state": {"tab", "compare"}, "page.product": {"tab"},
     "batch": {"steps", "stop_on_error"},
     "action": {"tab", "action", "element", "text", "values", "files", "key", "target", "x", "y", "mode", "settle_ms",
@@ -126,11 +131,22 @@ class Protocol:
                     "browser_policy": browser.config.browser, "browser": browser.browser_info,
                     "readiness_statuses": ["ready", "loading", "empty", "blocked", "login_required", "http_error", "error"],
                     "navigate_includes": ["records", "product", "state", "events"],
-                    "record_auto_fields": ["title", "url", "price", "original_price", "discount", "shipping", "sold", "rating", "reviews", "image", "text"]}
+                    "navigate_modes": ["summary", "minimal", "full", "viewport", "main", "changes"],
+                    "record_auto_fields": ["title", "url", "price", "original_price", "discount", "shipping", "sold", "recent_sales",
+                                           "rating", "reviews", "image", "text"],
+                    "record_field_spec": sorted(RECORD_SPEC_KEYS), "record_field_types": sorted(RECORD_TYPES),
+                    "query_fields": sorted(QUERY_FIELDS), "missing_reasons": MISSING_REASONS,
+                    "profile_settings": ["locale", "timezone_id", "viewport", "mobile", "device_scale_factor", "media_policy"],
+                    "profiles": {name: browser.settings.get(name) for name in browser.contexts},
+                    "runtime": browser.runtime}
         if command == "profile.create":
-            return await browser.create_profile(**params)
+            result = await browser.create_profile(**params)
+            # 실행 엔진 정보는 세션의 첫 응답(profile.create 또는 navigate)에 전체를, 이후에는 runtime_id만 싣는다.
+            result["runtime"] = browser.announce_runtime()
+            return result
         if command == "profile.list":
-            return {"profiles": [{"name": name, "media_policy": browser.policies[name]} for name in browser.contexts]}
+            return {"profiles": [{"name": name, "media_policy": browser.policies[name], **(browser.settings.get(name) or {})}
+                                 for name in browser.contexts], "runtime": browser.runtime}
         if command == "profile.close":
             return await browser.close_profile(params["name"])
         if command == "tab.list":

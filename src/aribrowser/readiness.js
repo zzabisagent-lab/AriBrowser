@@ -93,6 +93,7 @@
 
   // ---------- 반복 목록/가격/상품 신호(페이지 종류 추정용) ----------
   let repeatedGroups = 0;
+  let repeatedMax = 0; // 가장 큰 반복 그룹의 항목 수. 그룹이 하나뿐인 검색 결과(카드 12개)를 목록으로 판정하는 근거다(v0.3.0).
   let visited = 0;
   const queue = body ? [body] : [];
   while (queue.length && visited < 1500) {
@@ -105,7 +106,7 @@
       groups.set(key, (groups.get(key) || 0) + 1);
       if (child.children.length) queue.push(child);
     }
-    for (const size of groups.values()) if (size >= 4) repeatedGroups++;
+    for (const size of groups.values()) { if (size >= 4) repeatedGroups++; if (size > repeatedMax) repeatedMax = size; }
   }
   const prices = lib.findPrices(text.slice(0, 30000), 50).length;
   const structured = {
@@ -126,7 +127,7 @@
     password_inputs: visibleCount('input[type=password]'),
     buttons: visibleCount('button, [role=button], input[type=submit]'),
     skeletons, spinners, app_root: appRoot, captcha: evidence.slice(0, 10),
-    repeated_groups: repeatedGroups, prices, structured,
+    repeated_groups: repeatedGroups, repeated_max: repeatedMax, prices, structured,
     error_page: location.href.startsWith('chrome-error://'),
     noscript: !!document.querySelector('noscript') && text.length < 300,
   };

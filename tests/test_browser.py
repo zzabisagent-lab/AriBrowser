@@ -253,7 +253,7 @@ async def test_invalid_requests_recover(app, payload, code):
     _, protocol = app
     result = await protocol.handle(payload)
     assert result["error"]["code"] == code, result
-    assert (await command(protocol, "capabilities"))["version"] == "0.2.0"
+    assert (await command(protocol, "capabilities"))["version"] == "0.3.0"
 
 
 # ---------------------------------------------------------------- v0.1.0 요구사항 검증
@@ -324,7 +324,7 @@ async def test_p0_3_record_extraction(app, site):
     assert SHORT_ID.match(first["id"]) and SHORT_ID.match(auto["detection"]["container"])
     # 각 레코드의 필드는 같은 카드에서만 나온다(상품 B 가격이 A에 섞이지 않는다).
     assert [r["fields"]["price"]["value"] for r in auto["records"]] == [35000, 15580, 22900, 99000, 15580, 48000, 6200]
-    assert auto["records"][3]["missing"] == {"image": "no_match"}
+    assert auto["records"][3]["missing"] == {"image": "selector_no_match"}
     deduped = await command(protocol, "extract", dedupe=True)
     assert deduped["matched"] == 6 and deduped["duplicates_removed"] == 1
     explicit = await command(protocol, "extract", container="#products", item="li.prod", limit=2,
@@ -334,7 +334,7 @@ async def test_p0_3_record_extraction(app, site):
     assert explicit["total"] == 7 and len(explicit["records"]) == 2 and explicit["next_offset"] == 2
     assert explicit["records"][0]["fields"] == {"name": "아크릴 보드 A", "price": {"raw": "35,000원", "value": 35000, "currency": "KRW"},
                                                 "link": site["url"] + "/item/1", "seller": "가", "rating": None}
-    assert explicit["records"][0]["missing"] == {"rating": "no_match"}
+    assert explicit["records"][0]["missing"] == {"rating": "selector_no_match"}
     # 레코드 ID를 범위로 하위 링크를 찾아 바로 조작할 수 있다.
     link = await command(protocol, "query", selector="a.name", scope=explicit["records"][0]["id"], fields=["id", "href"])
     assert link["total"] == 1 and link["items"][0]["href"].endswith("/item/1")
@@ -542,7 +542,7 @@ async def test_p2_3_doctor_diagnostics(app):
     """P2-3: 버전/Chromium 경로/사용자/DISPLAY/AppArmor/userns/샌드박스 검사와 단계별 코드를 돌려준다."""
     browser, protocol = app
     report = await command(protocol, "doctor")
-    assert report["aribrowser"] == "0.2.0" and report["chromium"]["exists"] and report["chromium"]["version"]
+    assert report["aribrowser"] == "0.3.0" and report["chromium"]["exists"] and report["chromium"]["version"]
     assert {"name", "uid", "is_root"} <= set(report["user"]) and "DISPLAY" in report["display"]
     assert {c["id"] for c in report["checks"]} >= {"user", "display", "chromium", "sandbox_launch"}
     assert report["sandbox"]["ok"] and report["sandbox"]["no_sandbox_flag"] is True
