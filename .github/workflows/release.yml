@@ -113,7 +113,7 @@ jobs:
         # 이 작업은 소스를 pip로 설치하므로 PATH의 `aribrowser`는 소스 콘솔 스크립트다. 패키지 바이너리는 /usr/bin/aribrowser로 부른다.
         run: |
           run() { local name="$1"; shift; local out rc; if out=$("$@" 2>&1); then echo "::notice::$name ok: $(echo "$out" | tr '\n' ' ' | cut -c1-400)"; else rc=$?; echo "::error::$name failed (exit $rc): $(echo "$out" | tr '\n' ' ' | cut -c1-2000)"; exit $rc; fi; }
-          run "uninstall previous sandbox" sudo -E env "PATH=$PATH" python -m /usr/bin/aribrowser --uninstall-sandbox
+          run "uninstall previous sandbox" sudo -E env "PATH=$PATH" python -m aribrowser --uninstall-sandbox
           run "helper absent before deb" test ! -e /usr/local/lib/aribrowser/chrome-sandbox
           run "artifacts" ls -la artifacts
           run "apt install deb" sudo apt-get install -y ./artifacts/aribrowser_*_amd64.deb
@@ -121,9 +121,9 @@ jobs:
           run "package binary on PATH" sh -c "command -v aribrowser; readlink -f /usr/bin/aribrowser"
           run "version" /usr/bin/aribrowser --version
           run "environment" sh -c "env | grep -i playwright || true; ls -la /opt/aribrowser/_internal/playwright/driver/package/.local-browsers; readlink -f /usr/bin/aribrowser"
-          run "doctor chromium" sh -c "aribrowser --doctor --browser bundled --no-launch --data-dir /tmp/deb-test | python -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(d[\"chromium\"], ensure_ascii=False)); print(json.dumps(d.get(\"launch_env\"), ensure_ascii=False))'"
+          run "doctor chromium" sh -c "/usr/bin/aribrowser --doctor --browser bundled --no-launch --data-dir /tmp/deb-test | python -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(d[\"chromium\"], ensure_ascii=False)); print(json.dumps(d.get(\"launch_env\"), ensure_ascii=False))'"
           run "self-test" /usr/bin/aribrowser --self-test --browser bundled --data-dir /tmp/deb-test
-          run "doctor" sh -c "aribrowser --doctor --browser bundled --data-dir /tmp/deb-test > doctor-deb.json"
+          run "doctor" sh -c "/usr/bin/aribrowser --doctor --browser bundled --data-dir /tmp/deb-test > doctor-deb.json"
           run "doctor assert" python -c "import json; d=json.load(open('doctor-deb.json')); print(json.dumps(d['summary'], ensure_ascii=False), d['sandbox'].get('sandbox_source'), d['sandbox'].get('code'), d['sandbox'].get('message')); assert d['summary']['ok'] and d['sandbox']['sandbox_active'] and d['sandbox']['sandbox_source'] == 'setuid_helper', d['summary']"
           run "jsonl session" sh -c "printf '%s\n' '{\"id\":1,\"command\":\"navigate\",\"params\":{\"url\":\"data:text/html,<title>deb</title><main><h1>Ready</h1><p>deb package runtime check</p></main>\",\"mode\":\"minimal\"}}' '{\"id\":2,\"command\":\"close\"}' | /usr/bin/aribrowser --browser bundled --data-dir /tmp/deb-test > deb-session.jsonl"
           run "runtime assert" python -c "import json; lines=[json.loads(l) for l in open('deb-session.jsonl')]; print(json.dumps(lines[0], ensure_ascii=False)[:800]); r=lines[0]['result']; assert r['runtime']['sandbox_active'] and r['runtime']['resolved_executable'].startswith('/opt/aribrowser/'), r['runtime']"
