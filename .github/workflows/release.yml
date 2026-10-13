@@ -118,6 +118,8 @@ jobs:
           run "apt install deb" sudo apt-get install -y ./artifacts/aribrowser_*_amd64.deb
           run "helper installed by postinst" test -u /usr/local/lib/aribrowser/chrome-sandbox
           run "version" aribrowser --version
+          run "environment" sh -c "env | grep -i playwright || true; ls -la /opt/aribrowser/_internal/playwright/driver/package/.local-browsers; readlink -f /usr/bin/aribrowser"
+          run "doctor chromium" sh -c "aribrowser --doctor --browser bundled --no-launch --data-dir /tmp/deb-test | python -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(d[\"chromium\"], ensure_ascii=False)); print(json.dumps(d.get(\"launch_env\"), ensure_ascii=False))'"
           run "self-test" aribrowser --self-test --browser bundled --data-dir /tmp/deb-test
           run "doctor" sh -c "aribrowser --doctor --browser bundled --data-dir /tmp/deb-test > doctor-deb.json"
           run "doctor assert" python -c "import json; d=json.load(open('doctor-deb.json')); print(json.dumps(d['summary'], ensure_ascii=False), d['sandbox'].get('sandbox_source'), d['sandbox'].get('code'), d['sandbox'].get('message')); assert d['summary']['ok'] and d['sandbox']['sandbox_active'] and d['sandbox']['sandbox_source'] == 'setuid_helper', d['summary']"
