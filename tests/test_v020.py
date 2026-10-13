@@ -19,6 +19,7 @@ from .conftest import command
 
 
 # ---------------------------------------------------------------- 샌드박스/브라우저 정책
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="AppArmor 정책과 POSIX 경로 글로브는 Linux 전용")
 def test_sandbox_policy_is_install_path_independent():
     """AppArmor 정책은 모든 사용자 캐시와 배포 디렉터리 구조에 붙고, 경로 포함 검사는 글로브를 해석한다."""
     profile = sandbox.render_profile("/opt/custom root/browsers")
