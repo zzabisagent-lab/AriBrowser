@@ -112,7 +112,7 @@ jobs:
         # 각 하위 명령의 출력을 GitHub 주석(::notice/::error)으로 남겨 작업 로그 권한 없이도 실패 원인을 볼 수 있게 한다.
         # 이 작업은 소스를 pip로 설치하므로 PATH의 `aribrowser`는 소스 콘솔 스크립트다. 패키지 바이너리는 /usr/bin/aribrowser로 부른다.
         run: |
-          run() { local name="$1"; shift; local out rc; if out=$("$@" 2>&1); then echo "::notice::$name ok: $(echo "$out" | tr '\n' ' ' | cut -c1-400)"; else rc=$?; echo "::error::$name failed (exit $rc): $(echo "$out" | tr '\n' ' ' | cut -c1-2000)"; exit $rc; fi; }
+          run() { local name="$1"; shift; local out rc; if out=$("$@" 2>&1); then echo "::notice::$name ok: $(echo "$out" | tr '\n' ' ' | cut -c1-1500)"; else rc=$?; echo "::error::$name failed (exit $rc): $(echo "$out" | tr '\n' ' ' | cut -c1-2000)"; exit $rc; fi; }
           run "uninstall previous sandbox" sudo -E env "PATH=$PATH" python -m aribrowser --uninstall-sandbox
           run "helper absent before deb" test ! -e /usr/local/lib/aribrowser/chrome-sandbox
           run "artifacts" ls -la artifacts
@@ -122,6 +122,8 @@ jobs:
           run "version" /usr/bin/aribrowser --version
           run "environment" sh -c "env | grep -i playwright || true; ls -la /opt/aribrowser/_internal/playwright/driver/package/.local-browsers; readlink -f /usr/bin/aribrowser"
           run "doctor chromium" sh -c "/usr/bin/aribrowser --doctor --browser bundled --no-launch --data-dir /tmp/deb-test | python -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(d[\"chromium\"], ensure_ascii=False)); print(json.dumps(d.get(\"launch_env\"), ensure_ascii=False))'"
+          run "helper facts" sh -c "ls -la /usr/local/lib/aribrowser; getfacl -p /usr/local/lib/aribrowser/chrome-sandbox 2>/dev/null | tr '\n' ' '; stat -c '%A %a %U:%G' /usr/local/lib/aribrowser/chrome-sandbox; findmnt -T /usr/local/lib/aribrowser -o TARGET,SOURCE,OPTIONS; cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+          run "doctor helper" sh -c "/usr/bin/aribrowser --doctor --browser bundled --no-launch --data-dir /tmp/deb-test | python -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps({\"helper\": d[\"sandbox_helper\"], \"launch_env\": d.get(\"launch_env\"), \"userns\": d.get(\"userns\"), \"checks\": [c for c in d[\"checks\"] if c[\"status\"] != \"ok\"]}, ensure_ascii=False))'"
           run "self-test" /usr/bin/aribrowser --self-test --browser bundled --data-dir /tmp/deb-test
           run "doctor" sh -c "/usr/bin/aribrowser --doctor --browser bundled --data-dir /tmp/deb-test > doctor-deb.json"
           run "doctor assert" python -c "import json; d=json.load(open('doctor-deb.json')); print(json.dumps(d['summary'], ensure_ascii=False), d['sandbox'].get('sandbox_source'), d['sandbox'].get('code'), d['sandbox'].get('message')); assert d['summary']['ok'] and d['sandbox']['sandbox_active'] and d['sandbox']['sandbox_source'] == 'setuid_helper', d['summary']"
