@@ -231,12 +231,10 @@ def prefer_bundled_browsers() -> None:
     Chromium 대신 캐시의 다른 리비전이 실행되어 `runtime.resolved_executable`이 설치 경로를 벗어났다.
     다른 실행 파일을 쓰려면 `--chromium <경로>`를 지정한다.
     """
-    if not getattr(sys, "frozen", False):
-        return
-    internal = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent / "_internal"))
-    local = internal / "playwright" / "driver" / "package" / ".local-browsers"
-    if local.is_dir() and os.environ.get("PLAYWRIGHT_BROWSERS_PATH") not in (None, "0"):
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+    local = sandbox.bundle_browsers_dir()
+    if local is not None:
+        # "0"(패키지 상대) 대신 절대 경로를 준다. 드라이버가 어떤 작업 디렉터리/패키지 루트를 쓰든 같은 디렉터리다.
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(local)
 
 
 def main() -> None:

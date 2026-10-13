@@ -424,7 +424,13 @@ class Engine:
         candidates = []
         policy = self.config.browser
         if policy in {"auto", "bundled"}:
-            candidates.append({"kind": "bundled", "executable_path": None, "resolved": bundled})
+            # v0.3.0: 번들 바이너리인데 Playwright가 번들 밖의 Chromium을 골랐으면 번들 안의 같은 바이너리를 명시한다.
+            rebased = sandbox.rebase_into_bundle(bundled, sandbox.bundle_browsers_dir(), self.config.headless)
+            if rebased:
+                self.emit("browser_rebased", from_executable=bundled, executable=rebased)
+                candidates.append({"kind": "bundled", "executable_path": rebased, "resolved": rebased})
+            else:
+                candidates.append({"kind": "bundled", "executable_path": None, "resolved": bundled})
         if policy in {"auto", "system"}:
             for found in sandbox.system_browsers():
                 candidates.append({"kind": found["kind"], "executable_path": found["path"], "resolved": found["resolved"], "snap": found["snap"]})

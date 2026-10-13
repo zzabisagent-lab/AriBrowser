@@ -43,7 +43,7 @@ Amazon 상품 검색 동시 벤치마크(`docs/benchmarks/2026-10-13-amazon-guit
 
 - `capabilities`에 `runtime`, `profiles`, `profile_settings`, `navigate_modes`, `record_field_spec`, `record_field_types`, `query_fields`, `missing_reasons`를 추가하고 `record_auto_fields`에 `recent_sales`를 넣었습니다. `profile.list`가 적용 설정을 돌려줍니다.
 - 이벤트 `profile_settings_ignored`(손상된 설정 파일 무시)를 추가했습니다.
-- 번들 바이너리는 호스트에 `PLAYWRIGHT_BROWSERS_PATH`가 설정돼 있어도 자신에게 포함된 Chromium을 씁니다(다른 실행 파일은 `--chromium`). 이전에는 그 변수가 가리키는 캐시의 다른 리비전이 실행될 수 있었습니다.
+- 번들 바이너리는 호스트의 Playwright 캐시나 `PLAYWRIGHT_BROWSERS_PATH`와 무관하게 자신에게 포함된 Chromium을 씁니다(브라우저 디렉터리를 절대 경로로 고정하고, 그래도 번들 밖 경로가 선택되면 번들 안의 같은 바이너리로 바꾸며 `browser_rebased` 이벤트를 남김). 다른 실행 파일은 `--chromium`으로 지정합니다. 이전에는 사용자 캐시의 같은 리비전이 설치 경로 대신 실행될 수 있었습니다.
 - 테스트 사이트에 Amazon 한국어 결과를 본뜬 `/amazon`(링크가 h2를 감싸는 카드, 최댓값 우선 평점, 최근 월 구매 배지, 추적 매개변수 URL, 링크 없는 카드)과 로캘/시간대 확인용 `/echo`를 추가하고 `tests/test_v030.py`에 회귀시험을 넣었습니다.
 - 문서: `docs/PROTOCOL.md`(0.3.0 기본 동작, 필드 명세, dedupe/quality, minimal, runtime), `docs/FEATURES.md`, `docs/SANDBOX.md`(.deb), README를 갱신했습니다.
 

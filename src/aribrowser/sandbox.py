@@ -73,6 +73,45 @@ def is_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
+def bundle_browsers_dir() -> Path | None:
+    """PyInstaller 번들 안의 Playwright 브라우저 디렉터리(`_internal/playwright/driver/package/.local-browsers`).
+
+    번들 바이너리가 아니거나 그 디렉터리가 없으면 None이다. v0.3.0: 번들 바이너리는 호스트의 Playwright
+    캐시나 PLAYWRIGHT_BROWSERS_PATH와 무관하게 이 디렉터리의 Chromium만 쓴다(설치 경로 밖의 다른 리비전이
+    실행되는 것을 막는다). 다른 실행 파일은 `--chromium`으로 지정한다.
+    """
+    if not getattr(sys, "frozen", False):
+        return None
+    internal = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent / "_internal"))
+    local = internal / "playwright" / "driver" / "package" / ".local-browsers"
+    return local if local.is_dir() else None
+
+
+def rebase_into_bundle(executable: str | None, local: Path | None, headless: bool = True) -> str | None:
+    """Playwright가 번들 밖(사용자 캐시 등)의 Chromium을 골랐으면 번들 디렉터리의 같은 상대 경로로 바꾼다.
+
+    `<root>/chromium-1243/chrome-linux64/chrome` → `<local>/chromium-1243/chrome-linux64/chrome`. headless면 같은
+    리비전의 chrome-headless-shell을 우선한다(Playwright가 executable_path 없이 실행할 때 고르는 것과 같은 바이너리이며,
+    같은 리비전이 없으면 번들의 최신 headless shell). 번들 안에 쓸 바이너리가 없으면 None(원래 선택을 유지).
+    """
+    if not executable or local is None:
+        return None
+    path = Path(executable)
+    if local in path.parents:
+        return None
+    layout = chromium_layout(executable)
+    try:
+        relative = path.relative_to(layout["browsers_root"])
+    except ValueError:
+        return None
+    candidate = local / relative
+    if headless:
+        shell = chromium_layout(str(candidate)).get("headless_shell")
+        if shell and Path(shell).is_file() and local in Path(shell).parents:
+            return shell
+    return str(candidate) if candidate.is_file() else None
+
+
 def chromium_layout(executable_path: str) -> dict:
     """실행 파일 경로에서 Chromium 디렉터리, 브라우저 루트, headless shell 경로를 계산한다."""
     chromium = Path(executable_path).resolve()

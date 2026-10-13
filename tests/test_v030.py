@@ -261,3 +261,24 @@ async def test_runtime_info_reported_once_then_by_id(tmp_path, site, monkeypatch
     assert created["runtime"]["kind"] == "chrome" and created["runtime"]["fallback_from"].startswith("SANDBOX_")
     assert created["runtime"]["executable"] == bundled and created["runtime"]["version"]
     await fallback.close()
+
+
+def test_rebase_into_bundle(tmp_path):
+    """번들 밖(사용자 캐시)의 Chromium 경로를 번들 디렉터리의 같은 상대 경로(headless면 headless shell)로 바꾼다."""
+    cache = tmp_path / "cache"
+    local = tmp_path / "bundle" / ".local-browsers"
+    for root in (cache, local):
+        (root / "chromium-1243" / "chrome-linux64").mkdir(parents=True)
+        (root / "chromium-1243" / "chrome-linux64" / "chrome").write_bytes(b"x")
+        (root / "chromium_headless_shell-1243" / "chrome-headless-shell-linux64").mkdir(parents=True)
+        (root / "chromium_headless_shell-1243" / "chrome-headless-shell-linux64" / "chrome-headless-shell").write_bytes(b"x")
+    outside = str(cache / "chromium-1243" / "chrome-linux64" / "chrome")
+    assert sandbox.rebase_into_bundle(outside, local, headless=True) == str(local / "chromium_headless_shell-1243" / "chrome-headless-shell-linux64" / "chrome-headless-shell")
+    assert sandbox.rebase_into_bundle(outside, local, headless=False) == str(local / "chromium-1243" / "chrome-linux64" / "chrome")
+    inside = str(local / "chromium-1243" / "chrome-linux64" / "chrome")
+    assert sandbox.rebase_into_bundle(inside, local) is None  # 이미 번들 안이면 그대로
+    assert sandbox.rebase_into_bundle(outside, None) is None and sandbox.rebase_into_bundle(None, local) is None
+    # 번들에 없는 리비전: headless면 번들의 headless shell로, 아니면 None(원래 선택 유지).
+    assert sandbox.rebase_into_bundle(str(cache / "chromium-9999" / "chrome-linux64" / "chrome"), local).endswith("chrome-headless-shell")
+    assert sandbox.rebase_into_bundle(str(cache / "chromium-9999" / "chrome-linux64" / "chrome"), local, headless=False) is None
+    assert sandbox.bundle_browsers_dir() is None  # 소스 실행은 번들이 아니다
