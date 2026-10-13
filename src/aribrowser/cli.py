@@ -223,11 +223,28 @@ async def run(args) -> int:
         await browser.close()
 
 
+def prefer_bundled_browsers() -> None:
+    """번들 바이너리는 호스트의 PLAYWRIGHT_BROWSERS_PATH와 무관하게 자신에게 포함된 Chromium을 쓴다(v0.3.0).
+
+    playwright-python은 PyInstaller 번들에서 PLAYWRIGHT_BROWSERS_PATH가 비어 있을 때만 "0"(패키지 안의
+    .local-browsers)을 쓴다. GitHub Actions 러너처럼 그 변수가 사용자 캐시를 가리키는 환경에서는 번들
+    Chromium 대신 캐시의 다른 리비전이 실행되어 `runtime.resolved_executable`이 설치 경로를 벗어났다.
+    다른 실행 파일을 쓰려면 `--chromium <경로>`를 지정한다.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    internal = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent / "_internal"))
+    local = internal / "playwright" / "driver" / "package" / ".local-browsers"
+    if local.is_dir() and os.environ.get("PLAYWRIGHT_BROWSERS_PATH") not in (None, "0"):
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+
+
 def main() -> None:
     """Windows를 포함해 UTF-8을 강제하고 Ctrl+C/BrokenPipe를 조용히 정리한다."""
     for stream in (sys.stdin, sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
+    prefer_bundled_browsers()
     args = parser().parse_args()
     if not 1 <= args.timeout_ms <= 30000:
         parser().error("--timeout-ms는 1~30000입니다.")
