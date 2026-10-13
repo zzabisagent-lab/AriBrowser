@@ -7,6 +7,10 @@ v0.1.0 추가 명령: `query`(CSS 선택자 질의), `extract`(반복 레코드 
 `page.state`(정렬·필터·페이지 상태), `doctor`(실행 환경 진단), `session.cleanup`
 (잔여 프로세스/잠금 정리). 기존 관측 명령에는 format/fields/compact와
 max_bytes/max_elements/max_tokens 예산, `wait`/`action.expect`에는 SPA 대기 조건이 추가됐다.
+
+v0.2.0 추가: `page.product`(상품 상세 요약), `batch`(여러 명령을 한 왕복에 순차 실행),
+`navigate`의 `ready`(로딩 품질 검증/재시도)·`include`(records/product/state/events)·`extract`,
+관측 응답의 `include_events`(기본 false: 이벤트 원문 대신 `activity` 집계).
 """
 
 import asyncio
@@ -23,14 +27,15 @@ from .errors import BrowserError
 from .render import load_media, render, request_resource
 from .waiting import WAIT_KEYS, parse_conditions, parse_timeout, wait_for
 
-# 관측 응답 공통 옵션: 출력 형식, 필드 선택, compact, 예산.
-VIEW = {"format", "fields", "compact", "max_bytes", "max_elements", "max_tokens"}
+# 관측 응답 공통 옵션: 출력 형식, 필드 선택, compact, 예산, 이벤트 원문 포함 여부.
+VIEW = {"format", "fields", "compact", "max_bytes", "max_elements", "max_tokens", "include_events"}
 # 명령별 허용 키를 공개해 Agent가 오타로 무시된 옵션을 성공으로 오인하지 않게 한다.
 COMMANDS = {
     "capabilities": set(), "profile.create": {"name", "viewport", "mobile", "device_scale_factor", "media_policy"},
     "profile.list": set(), "profile.close": {"name"},
     "tab.list": set(), "tab.new": {"profile", "url"}, "tab.switch": {"tab"}, "tab.close": {"tab"},
-    "navigate": {"url", "tab", "mode", "settle_ms", "expect", "limit", "offset", "include_hidden", "region", "max_regions", "max_headings"} | VIEW,
+    "navigate": {"url", "tab", "mode", "settle_ms", "expect", "ready", "include", "extract", "limit", "offset", "include_hidden",
+                 "region", "max_regions", "max_headings"} | VIEW,
     "snapshot": {"tab", "mode", "region", "offset", "limit", "include_hidden", "max_regions", "max_headings"} | VIEW,
     "find": {"tab", "text", "role", "region", "actionable", "include_hidden", "offset", "limit", "match", "operator", "in",
              "sort_by", "dedupe", "with_parent", "with_children", "child_roles"} | VIEW,
@@ -39,7 +44,8 @@ COMMANDS = {
               "limit", "dedupe", "max_text", "max_bytes", "max_elements", "max_tokens"},
     "extract": {"tab", "frame", "container", "item", "fields", "text", "match", "include_hidden", "offset", "limit",
                 "dedupe", "max_text", "max_bytes", "max_elements", "max_tokens"},
-    "page.state": {"tab", "compare"},
+    "page.state": {"tab", "compare"}, "page.product": {"tab"},
+    "batch": {"steps", "stop_on_error"},
     "action": {"tab", "action", "element", "text", "values", "files", "key", "target", "x", "y", "mode", "settle_ms",
                "expect", "verify", "limit", "offset", "include_hidden", "region"} | VIEW,
     "render": {"tab", "element", "target", "level", "clip", "load_media", "base64", "ocr", "ocr_language"},
@@ -80,6 +86,8 @@ class Protocol:
             timeout = max(45, self.browser.config.timeout_ms / 1000 * 3)
             if command == "doctor":
                 timeout = 120
+            elif command == "batch":
+                timeout = 600
             result = await asyncio.wait_for(self.dispatch(command, dict(params)), timeout=timeout)
             return {"id": request_id, "ok": True, "result": result}
         except BrowserError as error:
@@ -114,7 +122,11 @@ class Protocol:
                     "snapshot_formats": ["text", "elements", "both", "summary"],
                     "wait_conditions": sorted(WAIT_KEYS - {"timeout_ms"}), "tokenizer": TOKENIZER,
                     "default_max_bytes": browser.config.max_bytes or None, "sandbox": not browser.config.no_sandbox,
-                    "diagnostic_codes": sorted(sandbox.DOCTOR_CODES)}
+                    "diagnostic_codes": sorted(sandbox.DOCTOR_CODES),
+                    "browser_policy": browser.config.browser, "browser": browser.browser_info,
+                    "readiness_statuses": ["ready", "loading", "empty", "blocked", "login_required", "http_error", "error"],
+                    "navigate_includes": ["records", "product", "state", "events"],
+                    "record_auto_fields": ["title", "url", "price", "original_price", "discount", "shipping", "sold", "rating", "reviews", "image", "text"]}
         if command == "profile.create":
             return await browser.create_profile(**params)
         if command == "profile.list":
@@ -155,6 +167,10 @@ class Protocol:
             return await browser.extract(tab_id, **params)
         if command == "page.state":
             return await browser.page_state(tab_id, **params)
+        if command == "page.product":
+            return await browser.product(tab_id)
+        if command == "batch":
+            return await self.batch(params.get("steps"), params.get("stop_on_error", True))
         if command == "action":
             return await act(browser, tab_id=tab_id, **params)
         if command == "render":
@@ -227,6 +243,30 @@ class Protocol:
             self.closed = True
             return report
         raise BrowserError("UNKNOWN_COMMAND", command)
+
+    async def batch(self, steps, stop_on_error: bool) -> dict:
+        """여러 명령을 한 요청으로 순차 실행한다(v0.2.0).
+
+        Agent와의 왕복마다 프롬프트 전체가 다시 소비되므로 "탐색 → 추출 → 상태"처럼 결과가
+        서로 의존하지 않는 연속 명령은 한 번에 보내는 편이 싸다. 각 단계는 독립 검증을 거치며
+        실패하면 기본으로 거기서 멈춘다(stop_on_error=false면 계속). batch/close는 중첩할 수 없다.
+        """
+        if not isinstance(steps, list) or not 1 <= len(steps) <= 20:
+            raise BrowserError("INVALID_ARGUMENT", "steps는 1~20개의 {command, params} 배열입니다.")
+        if not isinstance(stop_on_error, bool):
+            raise BrowserError("INVALID_ARGUMENT", "stop_on_error는 true/false입니다.")
+        results = []
+        stopped_at = None
+        for index, step in enumerate(steps):
+            if not isinstance(step, dict) or step.get("command") in {"batch", "close"}:
+                raise BrowserError("INVALID_ARGUMENT", "각 단계는 {command, params} 객체이며 batch/close는 포함할 수 없습니다.", step=index)
+            response = await self.handle({"id": step.get("id", index), "command": step.get("command"), "params": step.get("params", {})})
+            results.append(response)
+            if not response["ok"] and stop_on_error:
+                stopped_at = index
+                break
+        return {"results": results, "completed": sum(1 for r in results if r["ok"]), "failed": sum(1 for r in results if not r["ok"]),
+                "stopped_at": stopped_at, "total": len(steps)}
 
     async def wait(self, tab_id: str | None = None, **params) -> dict:
         """명시한 조건이 모두 충족될 때까지 관측하며 비동기 콘텐츠/네트워크/DOM 안정화를 유한 시간 기다린다.

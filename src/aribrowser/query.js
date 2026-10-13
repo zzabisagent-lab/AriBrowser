@@ -11,13 +11,20 @@
  *                   묶어 반환한다. item 선택자가 없으면 반복 구조를 자동 감지한다.
  *
  * 반환하는 요소 ID는 긴 내부 ID이며 Python 쪽에서 짧은 ID로 변환된다.
+ *
+ * v0.2.0: 텍스트 조립과 가격·판매량·평점·리뷰·할인 해석은 textlib.js(TEXTLIB 자리에 삽입)를
+ * 공유한다. 요소 텍스트는 innerText 대신 textlib.textOf로 읽어 인라인 요소가 붙어 출력되는
+ * "₩12,3451,000+ 판매" 같은 문제를 피하고, 자동 필드에 sold/rating/reviews/original_price/
+ * discount를 추가했다. 레코드 응답에는 필드 커버리지 기반 품질 지표(quality)를 함께 돌려준다.
  */
 (params) => {
   const registry = (/*REGISTRY*/)(params.prefix);
+  const lib = (/*TEXTLIB*/);
   const maxText = params.maxText || 500;
   const skipTags = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'META', 'LINK', 'HEAD']);
-  /** 공백을 정규화하고 길이를 제한한다. 잘림 여부는 호출자가 길이로 판단한다. */
-  const normalize = value => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+  const normalize = lib.normalize;
+  /** 요소의 표시 텍스트(경계 규칙 적용)를 길이 제한과 함께 읽는다. */
+  const textOf = (element, limit = maxText) => lib.textOf(element, Math.max(limit, 1));
   const clip = (value, limit = maxText) => {
     const text = normalize(value);
     return text.length > limit ? text.slice(0, limit) : text;
@@ -37,25 +44,8 @@
       throw {code: 'INVALID_SELECTOR', selector, message: String(error.message || error)};
     }
   };
-  /** 가격 문자열에서 숫자와 통화를 분리한다. 한국 원화와 주요 통화 기호를 인식한다. */
-  const PRICE = /(?:(₩|\$|€|£|¥|USD|KRW|EUR|JPY)\s?)?(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?\s?(원|KRW|USD|EUR|달러|€|\$)?/g;
-  const parsePrice = text => {
-    const source = normalize(text);
-    // "200ml 6,200원"처럼 통화 표시가 없는 숫자(용량·수량)를 건너뛰고 첫 가격을 고른다.
-    for (const match of source.matchAll(PRICE)) {
-      if (!match[1] && !match[4]) continue;
-      const digits = match[2].replace(/,/g, '') + (match[3] ? '.' + match[3] : '');
-      const currency = match[1] || match[4];
-      return {raw: match[0].trim(), value: Number(digits),
-        currency: ({'₩': 'KRW', '원': 'KRW', '$': 'USD', '달러': 'USD', '€': 'EUR', '£': 'GBP', '¥': 'JPY'})[currency] || currency};
-    }
-    return null;
-  };
-  /** 숫자 필드: 쉼표를 제거한 첫 수를 반환한다. */
-  const parseNumber = text => {
-    const match = normalize(text).match(/-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?/);
-    return match ? Number(match[0].replace(/,/g, '')) : null;
-  };
+  const parsePrice = lib.parsePrice;
+  const parseNumber = lib.parseNumber;
   /** 접근 가능한 이름의 경량 근사. 전체 AX 계산은 collector/Chromium AX가 맡는다. */
   const nameOf = element => normalize(element.getAttribute('aria-label') || element.getAttribute('alt') ||
     element.getAttribute('title') || element.getAttribute('placeholder') || '');
@@ -107,7 +97,7 @@
     if (params.mode === 'query') {
       let elements = select(root, params.selector, true);
       if (!params.includeHidden) elements = elements.filter(isVisible);
-      if (textTest) elements = elements.filter(el => textTest(normalize(el.innerText || el.textContent)) || textTest(nameOf(el)));
+      if (textTest) elements = elements.filter(el => textTest(textOf(el, 20000)) || textTest(nameOf(el)));
       const total = elements.length;
       const fields = params.fields || ['id', 'tag', 'text', 'href'];
       const items = [];
@@ -118,7 +108,7 @@
         for (const field of fields) {
           if (field === 'id') item.id = registry.identify(element);
           else if (field === 'tag') item.tag = element.tagName.toLowerCase();
-          else if (field === 'text') item.text = clip(element.innerText || element.textContent);
+          else if (field === 'text') item.text = textOf(element);
           else if (field === 'name') item.name = nameOf(element);
           else if (field === 'role') item.role = roleOf(element);
           else if (field === 'href') item.href = element instanceof HTMLAnchorElement ? element.href : (absoluteUrl(element.getAttribute('href')) || null);
@@ -129,8 +119,16 @@
           else if (field === 'bounds') {
             const rect = element.getBoundingClientRect();
             item.bounds = {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)};
-          } else if (field === 'price') item.price = parsePrice(element.innerText || element.textContent);
-          else if (field === 'number') item.number = parseNumber(element.innerText || element.textContent);
+          } else if (field === 'price') item.price = parsePrice(textOf(element, 2000));
+          else if (field === 'number') item.number = parseNumber(textOf(element, 2000));
+          else if (field === 'sold') item.sold = lib.parseSold(textOf(element, 2000));
+          else if (field === 'rating') item.rating = lib.parseRating(textOf(element, 2000));
+          else if (field === 'reviews') {
+            // "리뷰 1,234"가 없어도 "★4.5 (1,234)"처럼 평점 뒤 괄호 수를 리뷰 수로 쓴다.
+            const text = textOf(element, 2000);
+            item.reviews = lib.parseReviews(text) || (lib.parseRating(text)?.reviews ?? null);
+          }
+          else if (field === 'discount') item.discount = lib.parseDiscount(textOf(element, 2000));
           else if (field === 'attributes') {
             item.attributes = {};
             for (const name of params.attributes || []) item.attributes[name] = attributeOf(element, name);
@@ -175,7 +173,7 @@
         }
         for (const [signature, members] of groups) {
           if (members.length < 3) continue;
-          const texts = members.map(m => normalize(m.innerText || m.textContent));
+          const texts = members.map(m => textOf(m, 400));
           const average = texts.reduce((sum, t) => sum + Math.min(t.length, 400), 0) / members.length;
           const rich = members.filter((m, i) => texts[i].length >= 12 && (m.querySelector('a[href], h1, h2, h3, h4, h5, img') || texts[i].length > 40)).length;
           if (rich < members.length * 0.6 || average < 12) continue;
@@ -189,24 +187,60 @@
       candidates.sort((a, b) => b.score - a.score);
       return candidates;
     }
-    /** 항목 하나를 자동 필드(title/url/price/shipping/image/text)로 읽는다. */
+    /**
+     * 항목 하나를 자동 필드로 읽는다.
+     * 필수 후보: title/url/price/image(없으면 missing에 원인을 남긴다).
+     * 선택 필드: original_price/discount/sold/rating/reviews/shipping(있을 때만 포함).
+     * 텍스트는 textOf로 조립하므로 가격과 판매량이 붙어 출력되지 않는다.
+     */
     function autoFields(item) {
       const fields = {};
       const missing = {};
-      const heading = item.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="name"], [class*="subject"]');
-      const anchors = [...item.querySelectorAll('a[href]')].filter(a => normalize(a.innerText || a.textContent));
-      const longest = anchors.slice().sort((a, b) => normalize(b.innerText).length - normalize(a.innerText).length)[0];
+      const heading = item.querySelector('h1, h2, h3, h4, h5, h6, [class*="title" i], [class*="name" i], [class*="subject" i]');
+      const anchors = [...item.querySelectorAll('a[href]')].filter(a => textOf(a, 300));
+      const longest = anchors.slice().sort((a, b) => textOf(b, 300).length - textOf(a, 300).length)[0];
       const image = item.querySelector('img');
-      const text = normalize(item.innerText || item.textContent);
-      const title = clip(heading?.innerText || heading?.textContent || longest?.innerText || image?.getAttribute('alt') || text.split(/\s{2,}|\n/)[0], 300);
+      const text = textOf(item, 20000);
+      const title = clip(textOf(heading, 300) || heading?.getAttribute('title') || textOf(longest, 300) || image?.getAttribute('alt') || text.split(/\s{2,}/)[0], 300);
       if (title) fields.title = title; else missing.title = 'no_match';
       const link = (heading && heading.closest('a[href]')) || heading?.querySelector('a[href]') || longest || anchors[0];
       if (link) fields.url = link.href; else missing.url = 'no_match';
-      const priceNode = item.querySelector('[class*="price"], [class*="prc"], [class*="amount"], [class*="cost"]');
-      const price = parsePrice(priceNode?.innerText || '') || parsePrice(text);
-      if (price) fields.price = price; else missing.price = 'no_match';
-      const shipping = text.match(/(?:배송비|배송)\s*:?\s*(무료|[\d,]+\s?원)|무료배송|free shipping/i);
-      if (shipping) fields.shipping = shipping[1] ? shipping[1].replace(/\s/g, '') : shipping[0];
+      // 가격 요소를 먼저 찾고(현재가/원가 구분), 없으면 항목 전체 텍스트에서 첫 가격을 쓴다.
+      const priceNodes = [...item.querySelectorAll('[class*="price" i], [class*="prc" i], [class*="amount" i], [class*="cost" i], [itemprop="price"]')]
+        .filter(node => !node.querySelector('[class*="price" i], [class*="prc" i]'));
+      const struck = node => !!node.closest('del, s, strike, [class*="original" i], [class*="before" i], [class*="regular" i], [class*="list-price" i], [class*="was" i], [class*="old" i]') ||
+        /line-through/.test(getComputedStyle(node).textDecorationLine || '');
+      let current = null;
+      let original = null;
+      for (const node of priceNodes) {
+        const price = parsePrice(textOf(node, 200));
+        if (!price) continue;
+        if (struck(node)) { if (!original) original = price; } else if (!current) current = price;
+      }
+      const inText = lib.findPrices(text, 4).map(p => ({raw: p.raw, value: p.value, currency: p.currency}));
+      if (!current) current = original ? null : inText[0] || null;
+      if (!current && original) { current = original; original = null; }
+      if (current) fields.price = current; else missing.price = 'no_match';
+      const discount = lib.parseDiscount(text);
+      if (!original && current && inText.length >= 2 && discount) {
+        // 취소선 요소가 없어도 할인율 표기가 있으면 텍스트의 더 큰 가격을 원가로 본다.
+        const higher = inText.find(p => p.value > current.value && p.currency === current.currency);
+        if (higher) original = {raw: higher.raw, value: higher.value, currency: higher.currency};
+      }
+      if (original && current && original.value > current.value) fields.original_price = original;
+      if (discount) fields.discount = discount.percent;
+      else if (fields.original_price && current) fields.discount = Math.round((1 - current.value / fields.original_price.value) * 100);
+      const shipping = lib.parseShipping(text);
+      if (shipping) fields.shipping = shipping;
+      const sold = lib.parseSold(text);
+      if (sold) fields.sold = sold;
+      const rating = lib.parseRating(text);
+      if (rating) {
+        fields.rating = rating.value;
+        if (rating.reviews) fields.reviews = rating.reviews;
+      }
+      const reviews = lib.parseReviews(text);
+      if (reviews) fields.reviews = reviews;
       if (image) fields.image = attributeOf(image, 'src'); else missing.image = 'no_match';
       fields.text = clip(text, 300);
       return {fields, missing};
@@ -220,7 +254,7 @@
         const targets = spec.selector ? select(item, spec.selector, true) : [item];
         if (!targets.length) { fields[name] = null; missing[name] = 'no_match'; continue; }
         const read = target => {
-          let value = spec.attr ? attributeOf(target, spec.attr) : clip(target.innerText || target.textContent);
+          let value = spec.attr ? attributeOf(target, spec.attr) : textOf(target);
           if (value == null || value === '') return null;
           if (spec.regex) {
             let pattern;
@@ -232,6 +266,8 @@
           if (spec.type === 'price') return parsePrice(value);
           if (spec.type === 'number') return parseNumber(value);
           if (spec.type === 'url') return absoluteUrl(value);
+          if (spec.type === 'count') return lib.parseCount(value);
+          if (spec.type === 'rating') return lib.parseRating(value);
           return value;
         };
         const values = (spec.all ? targets : targets.slice(0, 1)).map(read);
@@ -250,13 +286,16 @@
       detection = {method: 'selector', item: params.item};
     } else {
       const candidates = detectItems(root);
-      if (!candidates.length) return {records: [], total: 0, detection: {method: 'auto', found: false, candidates: []}, duplicates_removed: 0, offset: 0, next_offset: null};
+      if (!candidates.length) {
+        return {records: [], total: 0, matched: 0, detection: {method: 'auto', found: false, candidates: []}, duplicates_removed: 0,
+          offset: 0, next_offset: null, quality: {confidence: 'none', coverage: {}, records: 0}};
+      }
       members = candidates[0].members;
       detection = {method: 'auto', found: true, signature: candidates[0].signature,
         container: registry.identify(candidates[0].parent), container_tag: candidates[0].parent.tagName.toLowerCase(),
         candidates: candidates.slice(0, 4).map(c => ({signature: c.signature, count: c.members.length, container: registry.identify(c.parent)}))};
     }
-    if (textTest) members = members.filter(m => textTest(normalize(m.innerText || m.textContent)));
+    if (textTest) members = members.filter(m => textTest(textOf(m, 20000)));
     const total = members.length;
     const records = [];
     const seen = new Set();
@@ -276,8 +315,18 @@
     }
     const offset = params.offset || 0;
     const limit = params.limit || 50;
+    // 품질 지표: 필드 커버리지(값이 있는 레코드 비율)로 자동 감지가 상품 목록을 제대로 잡았는지 알린다.
+    const coverage = {};
+    const names = params.fields ? Object.keys(params.fields) : ['title', 'url', 'price', 'image'];
+    for (const name of names) {
+      coverage[name] = records.length ? Math.round(records.filter(r => r.fields[name] != null && r.fields[name] !== '').length / records.length * 100) / 100 : 0;
+    }
+    const key = params.fields ? names : ['title', 'url', 'price'];
+    const core = key.length ? key.reduce((sum, name) => sum + (coverage[name] || 0), 0) / key.length : 0;
+    const confidence = !records.length ? 'none' : core >= 0.8 ? 'high' : core >= 0.5 ? 'medium' : 'low';
     return {records: records.slice(offset, offset + limit), total, matched: records.length, duplicates_removed: duplicates,
-      detection, offset, next_offset: offset + limit < records.length ? offset + limit : null};
+      detection, offset, next_offset: offset + limit < records.length ? offset + limit : null,
+      quality: {confidence, coverage, records: records.length}};
   }
   try {
     return run();

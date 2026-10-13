@@ -1,4 +1,4 @@
-# v0.1.0 기능과 경계
+# v0.2.0 기능과 경계
 
 | 요구 영역 | 구현 |
 | --- | --- |
@@ -14,7 +14,9 @@
 | 자원 절약 | 이미지·미디어 요청/디코딩 보류, 요청된 URL 허용, 자동 재생 억제, 장식 이미지/배경 출력 생략, 자원 GET 재요청/상태 |
 | 탐색 상태 | 탭 생성/종료/전환, 팝업 감지, 뒤로/앞으로/새로고침, 영구 프로필별 세션 격리, 쿠키 관리 |
 | 파일 | input 업로드, 첨부 파일 다운로드 자동 보관, 완료/실패 조회 |
-| 운영 | 실행 환경 진단(`--doctor`), AppArmor/setuid 샌드박스 설치·검증·갱신, 프로세스/잠금 정리 보고, 잔여 세션 정리 |
+| 운영 | 실행 환경 진단(`--doctor`), 공용 setuid 도우미/경로 독립 AppArmor 정책 설치·검증, 시스템 브라우저 자동 대체, 프로세스/잠금 정리 보고, 잔여 세션 정리 |
+| 로딩 품질 | 탐색 후 빈 껍데기/차단/로그인/HTTP 오류 판정, 늦은 SPA 렌더 대기, 자동 재시도, 근거와 다음 조치 안내 |
+| 상품 추출 | 붙은 텍스트 경계 규칙, 가격·원가·할인·판매량·평점·리뷰·배송 자동 필드, 상세 페이지 요약(JSON-LD/메타/DOM), 품질 지표 |
 | 상태와 오류 | HTTP/네트워크/인증/요소/다운로드/팝업/충돌/응답 제한 시간/기대 미달/샌드박스·권한·의존성 실패를 분리 |
 
 ## 요구사항별 구현 요약 (P0~P2)
@@ -36,6 +38,18 @@
 | P2-2 | 프로세스 및 세션 정리 | `close`/`profile.close` 프로세스 종료·잔여 수·잠금 해제 보고, 잔여 잠금 자동 복구, `PROFILE_LOCKED`, `--cleanup`/`session.cleanup` | Windows는 lockfile 열기 가능 여부로 잔여 판단 |
 | P2-3 | 실행 환경 자동 진단 | `--doctor`/`doctor`: 버전·Chromium 경로/버전·사용자/UID·DISPLAY/XAUTHORITY·AppArmor·userns·setuid·샌드박스 실행·seccomp 근거·프로세스·잠금, 단계별 코드 | — |
 | P2-4 | 업데이트 후 Sandbox 유지 | 브라우저 루트 glob 정책, `aribrowser-root` 머리글로 경로 비교, `SANDBOX_PROFILE_STALE` 감지, 같은 이름 덮어쓰기, `--uninstall-sandbox`, 설치 후 `--doctor`/`--self-test` | 설치 디렉터리를 옮기면 재설치 필요 |
+
+## v0.2.0 개선 요약 (실사용 비교 보고서 기준)
+
+| 지적 사항 | 구현 | 경계 |
+| --- | --- | --- |
+| 새 설치 경로마다 AppArmor 정책 설치 필요 | 공용 setuid 도우미(`/usr/local/lib/aribrowser/chrome-sandbox`, 호스트당 1회), 경로 독립 AppArmor 정책(모든 사용자 캐시 + 배포 디렉터리 구조), `--browser auto`의 시스템 브라우저 대체 | 도우미/정책 설치에 root 1회 필요. 시스템 브라우저가 없고 설치도 안 했으면 `SANDBOX_USERNS_RESTRICTED` |
+| 탐색 응답에 불필요한 네트워크 이벤트 URL | `activity` 집계(종류별 수, 오류 최대 5건 축약 URL), `include_events`로만 원문 | 집계는 탭 기준이며 탭 무관 이벤트도 센다 |
+| 빈 껍데기 페이지를 성공으로 보고 | readiness 판정 → `PAGE_EMPTY`/`PAGE_BLOCKED`, 재시도, `content_ready`, 근거·안내 | 휴리스틱. 보안 문자 해결·차단 우회는 하지 않으며 `--headed`로 사람이 인증하는 경로를 안내 |
+| 품질 확인·재시도 부담 | `include`/`batch` 한 왕복, `quality`, `kind`별 다음 명령 추천, 요약 AX 생략으로 속도 향상 | `batch`는 순차 실행이며 단계 사이 값 참조는 Agent가 한다 |
+| (Chrome 장점) 선택적 DOM 추출 | `query`/`extract`/`page.product`는 관측 트리 없이 프레임 안에서 실행 | 선택자는 데이터로만 전달, 임의 JS 없음 |
+| (Chrome 단점) 사이트별 선택자·정규화 코드 | 자동 감지 레코드 + 확장 자동 필드 + 상세 요약(JSON-LD/메타/DOM) | 감지 실패 시 `item`/`fields`/`query`로 보완 |
+| (Chrome 단점) 붙은 가격·판매량 텍스트 후처리 | textlib 경계 규칙, 통화/수량/평점/리뷰/할인 해석기 공용화 | 해석기는 한국어/영어 표기 중심 |
 
 ## Chromium과 관측 범위
 
@@ -59,6 +73,6 @@ Canvas/WebGL/영상/SVG와 이름상 차트·지도는 `needs_visual`로 시각 
 
 ## 검증과 배포
 
-실제 로컬 HTTP 사이트를 사용하는 통합 테스트가 의미/ID/변경분, 상태/폼, Shadow DOM/교차 출처 iframe, 스크롤/가상 목록, 모달/대화상자/팝업, 포인터/파일, 이미지 보류/렌더, HTTP 오류/방문 기록, 프로필 격리/복원, 잘못된 요청 복구와 P0~P2 요구사항(요약 탐색, 형식/예산, 레코드 추출, 조작 검증, 페이지 상태, 내부 질의, 검색 최적화/문맥, SPA 대기, 짧은 ID, 예산 보고, 프로세스/잠금 정리, 진단)을 검증합니다. 네이티브 빌드에 포함된 Chromium을 `--self-test`/`--doctor`로 다시 실행합니다. Ubuntu 24.04의 AppArmor userns 제한 환경에서 `--install-sandbox` 후 샌드박스가 켜진 실행을 검증했습니다. CI 결과는 [Actions](https://github.com/zzabisagent-lab/AriBrowser/actions)에서 확인할 수 있습니다.
+실제 로컬 HTTP 사이트를 사용하는 통합 테스트가 의미/ID/변경분, 상태/폼, Shadow DOM/교차 출처 iframe, 스크롤/가상 목록, 모달/대화상자/팝업, 포인터/파일, 이미지 보류/렌더, HTTP 오류/방문 기록, 프로필 격리/복원, 잘못된 요청 복구와 P0~P2 요구사항(요약 탐색, 형식/예산, 레코드 추출, 조작 검증, 페이지 상태, 내부 질의, 검색 최적화/문맥, SPA 대기, 짧은 ID, 예산 보고, 프로세스/잠금 정리, 진단), 그리고 v0.2.0 항목(경로 독립 정책/브라우저 정책/대체 실행, 활동 집계, 로딩 품질 판정과 재시도, include/batch, 텍스트 경계와 자동 필드, 상품 상세 요약)을 검증합니다. 네이티브 빌드에 포함된 Chromium을 `--self-test`/`--doctor`로 다시 실행합니다. Ubuntu 24.04의 AppArmor userns 제한 환경에서 `--install-sandbox` 후 샌드박스가 켜진 실행을 검증했습니다. CI 결과는 [Actions](https://github.com/zzabisagent-lab/AriBrowser/actions)에서 확인할 수 있습니다.
 
 배포 바이너리에는 Chromium·Playwright·Python 런타임이 포함되어 크기가 큽니다. Linux 시스템 공유 라이브러리와 선택적 Tesseract는 번들에 포함하지 않습니다. macOS/Windows 상용 배포 서명 자격 증명은 사용하지 않습니다.

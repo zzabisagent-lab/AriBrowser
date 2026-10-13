@@ -253,7 +253,7 @@ async def test_invalid_requests_recover(app, payload, code):
     _, protocol = app
     result = await protocol.handle(payload)
     assert result["error"]["code"] == code, result
-    assert (await command(protocol, "capabilities"))["version"] == "0.1.0"
+    assert (await command(protocol, "capabilities"))["version"] == "0.2.0"
 
 
 # ---------------------------------------------------------------- v0.1.0 요구사항 검증
@@ -268,7 +268,9 @@ async def test_p0_1_navigation_returns_summary_by_default(app, site):
     assert summary["counts"]["total"] > 20 and summary["omitted"]["elements"] == summary["counts"]["total"]
     assert any(r["role"] == "main" for r in summary["regions"]) and any(r["role"] == "navigation" for r in summary["regions"])
     assert summary["headings"][0]["text"] == "검색 결과" and summary["headings"][0]["level"] == 1
-    assert summary["omitted"]["next"][0]["command"] == "snapshot"
+    # v0.2.0: 페이지 종류(listing)에 맞춰 extract를 먼저 추천한다.
+    assert summary["kind"] == "listing" and summary["omitted"]["next"][0]["command"] == "extract"
+    assert "events" not in summary and summary["activity"]["events"] > 0
     assert summary["budget"]["bytes"] < 6000 and summary["budget"]["tokenizer"]
     assert summary["verification"]["http_status"] == 200
     # 요약 크기 제한 매개변수와 세부 모드 선택도 가능하다.
@@ -540,7 +542,7 @@ async def test_p2_3_doctor_diagnostics(app):
     """P2-3: 버전/Chromium 경로/사용자/DISPLAY/AppArmor/userns/샌드박스 검사와 단계별 코드를 돌려준다."""
     browser, protocol = app
     report = await command(protocol, "doctor")
-    assert report["aribrowser"] == "0.1.0" and report["chromium"]["exists"] and report["chromium"]["version"]
+    assert report["aribrowser"] == "0.2.0" and report["chromium"]["exists"] and report["chromium"]["version"]
     assert {"name", "uid", "is_root"} <= set(report["user"]) and "DISPLAY" in report["display"]
     assert {c["id"] for c in report["checks"]} >= {"user", "display", "chromium", "sandbox_launch"}
     assert report["sandbox"]["ok"] and report["sandbox"]["no_sandbox_flag"] is True

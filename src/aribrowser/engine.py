@@ -8,6 +8,14 @@ v0.1.0에서 추가된 책임:
 - 프로필 실행 전 잔여 잠금을 진단·복구하고, 실행 실패를 샌드박스/권한/의존성 코드로 구분한다.
 - 프로필 종료 후 Chromium 프로세스의 실제 종료와 잠금 해제를 확인해 보고한다.
 - 탭마다 짧은 요소 ID 레지스트리를 둔다.
+
+v0.2.0에서 추가된 책임:
+- 브라우저 선택(`Config.browser`): `bundled`는 번들 Chromium만, `system`은 설치된 Chrome/Chromium/
+  Edge/Brave만, `auto`(기본)는 번들 Chromium이 샌드박스/의존성 문제로 실행되지 않을 때 시스템
+  브라우저로 대체한다. 어떤 경우에도 `--no-sandbox`로 대체하지 않으며 대체 사실은
+  `browser_fallback` 이벤트와 `browser_info`로 알린다.
+- 공용 setuid 샌드박스 도우미(sandbox.launch_env)를 실행 환경 변수로 전달한다.
+- 관측 응답에 이벤트 원문 대신 종류별 집계(`activity_view`)를 제공한다.
 """
 
 import asyncio
@@ -28,6 +36,20 @@ from .errors import BrowserError
 from .ids import IdRegistry
 
 
+def short_url(url: str, limit: int = 100) -> str:
+    """URL을 호스트와 경로 앞부분만 남겨 축약한다. 추적용 쿼리 문자열은 토큰만 낭비한다."""
+    try:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(url)
+        base = f"{parts.scheme}://{parts.netloc}{parts.path}"
+    except ValueError:
+        base = url
+    if len(base) > limit:
+        base = base[:limit - 1] + "…"
+    return base
+
+
 @dataclass
 class Config:
     """data_dir는 세션/다운로드 저장소, timeout_ms는 개별 브라우저 작업 상한이다.
@@ -35,6 +57,7 @@ class Config:
     max_bytes는 관측 명령 응답의 세션 기본 바이트 상한이다(0이면 무제한). 요청마다
     max_bytes/max_elements/max_tokens로 재지정할 수 있다. no_sandbox는 명시적으로
     요청했을 때만 True가 되며 어떤 실패 경로에서도 자동으로 켜지지 않는다.
+    browser는 실행 파일 선택 정책(auto|bundled|system)이며 executable_path가 있으면 그 경로를 쓴다.
     """
 
     data_dir: Path = field(default_factory=lambda: Path.home() / ".aribrowser")
@@ -47,6 +70,7 @@ class Config:
     media_policy: str = "defer"
     executable_path: str | None = None
     max_bytes: int = 500_000
+    browser: str = "auto"
 
 
 @dataclass
@@ -107,6 +131,8 @@ class Engine:
         # 프로필 이름 → Chromium 사용자 데이터 디렉터리. 프로세스/잠금 추적의 기준이다.
         self.profile_dirs: dict[str, Path] = {}
         self.close_report: dict | None = None
+        # 실제로 실행한 브라우저(번들/시스템)와 대체 사유. 첫 프로필 실행 때 채운다.
+        self.browser_info: dict | None = None
 
     def emit(self, kind: str, **data) -> None:
         """시간/증가 번호가 있는 이벤트를 저장한다. 웹 원문은 항상 데이터 필드에만 둔다."""
@@ -116,6 +142,40 @@ class Engine:
     def event_view(self, since: int = 0) -> dict:
         """누락 여부와 다음 커서를 포함하여 비동기 이벤트를 재조회 가능하게 제공한다."""
         return {"events": [e for e in self.events if e["seq"] > since], "cursor": self.sequence,
+                "events_omitted": bool(self.events and since < self.events[0]["seq"] - 1)}
+
+    # 응답 요약에서 URL까지 보여줄 가치가 있는 오류성 이벤트.
+    ERROR_EVENTS = {"network_failed", "not_found", "authentication_required", "server_error", "http_error",
+                    "script_error", "browser_crashed", "download_failed", "background_error"}
+
+    def activity_view(self, since: int = 0, tab_id: str | None = None, detail: int = 5) -> dict:
+        """이벤트 원문 대신 종류별 집계를 돌려준다(v0.2.0).
+
+        탐색 한 번에 광고/추적 iframe 탐색과 요청 실패 이벤트가 수십 개 생기고 각 URL이 수백 자에
+        이르러 응답의 절반 이상을 차지했다. 집계는 종류별 개수와 주 문서 탐색 정보, 오류성
+        이벤트 몇 건(URL은 호스트+경로로 축약)만 담고, 원문은 `events` 명령(since=cursor)으로
+        조회한다. `tab_id`가 있으면 그 탭과 탭 무관 이벤트만 센다.
+        """
+        selected = [e for e in self.events if e["seq"] > since and (tab_id is None or e.get("tab") in (tab_id, None))]
+        by_type = {}
+        for event in selected:
+            by_type[event["type"]] = by_type.get(event["type"], 0) + 1
+        errors = []
+        for event in selected:
+            if event["type"] in self.ERROR_EVENTS and len(errors) < detail:
+                entry = {"type": event["type"]}
+                if event.get("url"):
+                    entry["url"] = short_url(event["url"])
+                if event.get("status"):
+                    entry["status"] = event["status"]
+                if event.get("message"):
+                    entry["message"] = str(event["message"])[:120]
+                errors.append(entry)
+        navigation = [e for e in selected if e["type"] in {"navigation", "redirect"}]
+        return {"since": since, "cursor": self.sequence, "events": len(selected), "by_type": by_type,
+                "errors": errors, "errors_total": sum(by_type.get(t, 0) for t in self.ERROR_EVENTS),
+                "redirects": by_type.get("redirect", 0), "frame_navigations": by_type.get("frame_navigation", 0),
+                "final_url": navigation[-1]["url"] if navigation else None,
                 "events_omitted": bool(self.events and since < self.events[0]["seq"] - 1)}
 
     def background(self, coroutine) -> None:
@@ -159,29 +219,7 @@ class Engine:
                                holder_pid=lock.get("holder_pid"), fix=sandbox.DOCTOR_CODES["PROFILE_LOCKED"])
         if lock["removed"]:
             self.emit("profile_lock_recovered", profile=name, removed=lock["removed"], holder_pid=lock.get("holder_pid"))
-        executable = self.config.executable_path
-        if not executable:
-            try:
-                executable = self.playwright.chromium.executable_path
-            except Exception:
-                executable = None
-        env = {**os.environ, **sandbox.launch_env(executable)}
-        try:
-            context = await self.playwright.chromium.launch_persistent_context(
-                str(profile_dir), headless=self.config.headless,
-                executable_path=self.config.executable_path,
-                chromium_sandbox=not self.config.no_sandbox,
-                viewport=viewport, is_mobile=options.get("mobile", self.config.mobile),
-                has_touch=options.get("mobile", self.config.mobile),
-                device_scale_factor=options.get("device_scale_factor", 1),
-                accept_downloads=True, service_workers="block" if policy == "defer" else "allow",
-                args=["--autoplay-policy=user-gesture-required"], env=env,
-            )
-        except PlaywrightError as error:
-            # 같은 "sandboxing failed" 메시지라도 root 실행과 AppArmor 제한을 구분해 돌려준다.
-            layout = sandbox.chromium_layout(executable) if executable else {"browsers_root": None}
-            raise sandbox.launch_error(str(error), {"is_root": sandbox.is_root(),
-                                                    "apparmor": sandbox.apparmor_status(layout["browsers_root"])}) from error
+        context = await self._launch(name, profile_dir, viewport, options, policy)
         self.contexts[name] = context
         self.allowed[name] = set()
         self.policies[name] = policy
@@ -201,6 +239,78 @@ class Engine:
         if not context.pages:
             await context.new_page()
         return {"profile": name, "persistent": True, "media_policy": policy, "tabs": await self.list_tabs()}
+
+    def launch_candidates(self) -> list[dict]:
+        """Config.browser 정책에 따라 시도할 실행 파일 후보를 우선순위대로 만든다.
+
+        - executable_path가 있으면 그 경로 하나만 쓴다.
+        - bundled: Playwright가 설치한 번들 Chromium 하나.
+        - system: 설치된 시스템 브라우저만(없으면 SYSTEM_BROWSER_MISSING).
+        - auto: 번들 Chromium 다음에 시스템 브라우저(snap은 마지막).
+        """
+        if self.config.executable_path:
+            return [{"kind": "custom", "executable_path": self.config.executable_path}]
+        bundled = None
+        try:
+            bundled = self.playwright.chromium.executable_path
+        except Exception:
+            bundled = None
+        candidates = []
+        policy = self.config.browser
+        if policy in {"auto", "bundled"}:
+            candidates.append({"kind": "bundled", "executable_path": None, "resolved": bundled})
+        if policy in {"auto", "system"}:
+            for found in sandbox.system_browsers():
+                candidates.append({"kind": found["kind"], "executable_path": found["path"], "resolved": found["resolved"], "snap": found["snap"]})
+        if policy == "system" and len(candidates) == 0:
+            raise BrowserError("SYSTEM_BROWSER_MISSING", "설치된 시스템 브라우저를 찾지 못했습니다.", fix=sandbox.DOCTOR_CODES["SYSTEM_BROWSER_MISSING"])
+        return candidates
+
+    async def _launch(self, name: str, profile_dir: Path, viewport: dict, options: dict, policy: str) -> BrowserContext:
+        """후보를 순서대로 실행한다. 번들 Chromium의 샌드박스/의존성 실패만 시스템 브라우저로 대체한다.
+
+        대체는 `--no-sandbox`가 아니라 "이미 샌드박스가 동작하는 다른 Chromium"으로 바꾸는 것이다.
+        모든 후보가 실패하면 첫 후보(번들)의 오류를 돌려주고 details.tried에 시도 내역을 담는다.
+        """
+        candidates = self.launch_candidates()
+        tried = []
+        first_error = None
+        for candidate in candidates:
+            executable = candidate["executable_path"] or candidate.get("resolved")
+            env = {**os.environ, **sandbox.launch_env(executable)}
+            try:
+                context = await self.playwright.chromium.launch_persistent_context(
+                    str(profile_dir), headless=self.config.headless,
+                    executable_path=candidate["executable_path"],
+                    chromium_sandbox=not self.config.no_sandbox,
+                    viewport=viewport, is_mobile=options.get("mobile", self.config.mobile),
+                    has_touch=options.get("mobile", self.config.mobile),
+                    device_scale_factor=options.get("device_scale_factor", 1),
+                    accept_downloads=True, service_workers="block" if policy == "defer" else "allow",
+                    args=["--autoplay-policy=user-gesture-required"], env=env,
+                )
+            except PlaywrightError as error:
+                # 같은 "sandboxing failed" 메시지라도 root 실행과 AppArmor 제한을 구분해 돌려준다.
+                browser_error = sandbox.launch_error(str(error), sandbox.launch_context(executable))
+                tried.append({"kind": candidate["kind"], "executable": executable, "code": browser_error.code})
+                first_error = first_error or browser_error
+                recoverable = browser_error.code.startswith("SANDBOX_") or browser_error.code in {"CHROMIUM_DEPENDENCIES_MISSING", "CHROMIUM_MISSING"}
+                if candidate["kind"] == "bundled" and recoverable and len(candidates) > 1:
+                    self.emit("browser_fallback", reason=browser_error.code, fix=browser_error.details.get("fix"))
+                    continue
+                if candidate["kind"] != "bundled" and len(candidates) > 1:
+                    continue
+                break
+            if self.browser_info is None or self.browser_info.get("kind") != candidate["kind"]:
+                self.browser_info = {"kind": candidate["kind"], "executable": executable,
+                                     "fallback_from": tried[0]["code"] if tried else None,
+                                     "sandbox_helper": bool(env.get("CHROME_DEVEL_SANDBOX"))}
+                if tried:
+                    self.emit("browser_selected", browser=candidate["kind"], executable=executable, fallback_from=tried[0]["code"])
+            return context
+        assert first_error is not None
+        first_error.details["tried"] = tried
+        raise first_error
 
     def _attach(self, profile: str, page: Page) -> Tab:
         """새 탭/팝업에 동일한 상태 추적기를 설치하며 팝업을 임의로 활성화하지 않는다."""

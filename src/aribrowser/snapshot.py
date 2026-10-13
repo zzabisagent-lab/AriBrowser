@@ -21,17 +21,26 @@ MODES = {"full", "viewport", "main", "interactive", "region"}
 FORMATS = {"text", "elements", "both", "summary"}
 
 
+# AX 보강이 바꾸는 필드. 가벼운 관측(AX 생략)과 전체 관측 사이의 차이는 페이지 변화가 아니다.
+AX_FIELDS = {"name", "role", "description", "accessibility_source", "state"}
+
+
 def compare(before: dict | None, after: dict) -> dict:
-    """동일 ID의 속성 변경과 요소 추가/삭제, 탐색 상태 변화를 반환한다."""
+    """동일 ID의 속성 변경과 요소 추가/삭제, 탐색 상태 변화를 반환한다.
+
+    v0.2.0: 요약 관측은 속도를 위해 Chromium AX 보강을 생략한다. 그런 기준선과 AX 보강
+    관측을 비교할 때 이름/역할/설명/상태의 차이는 보강 수준 차이일 뿐이므로 변경으로 보지 않는다.
+    """
     before = before or {"elements": [], "page": {}}
     old = {e["id"]: e for e in before["elements"]}
     new = {e["id"]: e for e in after["elements"]}
     changed = []
     for key in old.keys() & new.keys():
+        refined = old[key].get("accessibility_source") != new[key].get("accessibility_source")
         fields = {
             field: {"before": old[key].get(field), "after": new[key].get(field)}
             for field in old[key].keys() | new[key].keys()
-            if old[key].get(field) != new[key].get(field) and field != "internal_id"
+            if old[key].get(field) != new[key].get(field) and field != "internal_id" and not (refined and field in AX_FIELDS)
         }
         if fields:
             changed.append({"id": key, "changes": fields})

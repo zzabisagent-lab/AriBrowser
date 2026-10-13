@@ -1,5 +1,70 @@
 # 버전 이력
 
+## 0.2.0 — 2026-10-13
+
+AI Agent가 **더 적은 토큰으로 더 빨리** 웹 검색 목표를 달성하도록, 실사용 비교(`docs/benchmarks/2026-10-13-aliexpress-aribrowser-vs-chrome.md`: AriBrowser 0.1.0 대 Chrome 직접 제어)에서 드러난 네 가지 문제를 고치고 Chrome 방식의 장점(설치 없이 바로 사용, 선택적 DOM 추출)을 가져온 릴리스입니다. 0.1.0의 장점(JSONL 인터페이스, 상품 카드 자동 탐지, 가격·URL·정렬 상태 기본 제공, 짧은 요소 ID와 예산, 명확한 진단)은 그대로 유지하며, 사이트별 선택자나 가격·판매량 텍스트 후처리 코드를 Agent가 직접 쓰지 않아도 되게 했습니다. 기본 동작이 바뀐 항목은 `docs/PROTOCOL.md`의 "0.2.0에서 달라진 기본 동작"을 참고하세요.
+
+### 실측 효과 (같은 호스트·같은 세션, 실제 사이트)
+
+| 상황 | 0.1.0 방식 | 0.2.0 기본 |
+| --- | --- | --- |
+| 다나와 통합검색 "아크릴" `navigate` | 13,270바이트 / 약 3,346토큰 (이벤트 원문 9,554바이트 포함) | 4,562바이트 / 약 1,200토큰 (`activity` 집계) |
+| 다나와 상품 상세 `navigate` | 19,610바이트 / 약 4,933토큰, 13.5초 (`load` 10초 대기 + AX 보강) | 4,323바이트 / 약 1,143토큰, 6.1초 (readiness 판정 + AX 생략 요약) |
+| AliExpress 상품 상세 `navigate` | 8,982바이트, **성공으로 보고** (빈 껍데기 + 보안 문자 프레임) | 2,059바이트, `PAGE_BLOCKED` 오류 + 근거(`_____tmd_____/punish` 프레임)·안내 |
+| 다나와 검색 `navigate` + 레코드 5건 + 정렬/페이지 상태 | 3회 왕복 | 1회 왕복 11,629바이트 / 약 3,108토큰 (`include=["records","state"]`) |
+| 다나와 상품 상세 `page.product` | 해당 없음 | 800바이트 / 약 206토큰 (제목·브랜드·가격·평점·리뷰 수·배송비·이미지, 출처 표시) |
+| 다나와 상세 페이지 관측(`observe`) | 5.5초 (수집 1.0초 + AX 보강 4.5초) | 요약 모드 1.0초 (AX 생략), 상세 모드는 그대로 |
+
+토큰은 외부 tokenizer 없이 문자 종류별 가중치로 추정한 값(`heuristic-v1`)이며 실제 모델과 다를 수 있습니다. 이벤트 수는 광고/추적 프레임 로딩 시점에 따라 달라지므로 같은 세션에서 연속 측정한 쌍만 비교했습니다.
+
+### 1. 설치 경로와 무관한 샌드박스 — "새 설치 경로마다 AppArmor 정책 설치" 해소
+
+- **공용 setuid 샌드박스 도우미(기본)**: `sudo ./aribrowser --install-sandbox`가 Chromium이 제공하는 `chrome_sandbox`를 고정 경로 `/usr/local/lib/aribrowser/chrome-sandbox`(root:root, 4755)에 **호스트당 한 번** 설치합니다. 모든 AriBrowser 실행은 이 도우미가 유효하면 `CHROME_DEVEL_SANDBOX`로 Chromium에 전달하므로 설치 경로, Chromium 리비전, 사용자와 무관하게 샌드박스가 동작합니다. AppArmor 유무, `kernel.apparmor_restrict_unprivileged_userns`, user namespace 제한에도 영향을 받지 않습니다(Google Chrome .deb가 쓰는 것과 같은 방식). 렌더러의 `Seccomp: 2`/`NoNewPrivs: 1`로 활성 근거를 확인합니다.
+- **경로 독립 AppArmor 정책(대안)**: `--sandbox-method apparmor`의 정책이 특정 설치 경로 대신 모든 사용자의 Playwright 캐시(`/home/*/.cache/ms-playwright`, `/root/.cache/ms-playwright`)와 AriBrowser 배포 디렉터리 구조(`/**/_internal/playwright/driver/package/.local-browsers`)에 동시에 붙습니다. 새 경로에 풀어도 재설치가 필요 없으며, 0.1.0 바이너리도 이 정책 아래에서 그대로 동작합니다. 정책 머리글 `aribrowser-roots`와 글로브 해석으로 현재 경로 포함 여부를 판정합니다.
+- **시스템 브라우저 자동 대체(`--browser auto`, 기본)**: 번들 Chromium이 샌드박스/의존성 문제로 실행되지 않고 Google Chrome/Chromium/Edge/Brave가 설치돼 있으면 그 브라우저로 실행합니다. 배포판이 이미 해당 브라우저에 userns를 허용하거나 자체 setuid 도우미를 갖추고 있어 **별도 설치 없이 바로 사용**할 수 있습니다. 대체는 `--no-sandbox`가 아니라 "샌드박스가 동작하는 다른 Chromium"으로 바꾸는 것이며 `browser_fallback`/`browser_selected` 이벤트와 `capabilities.browser`로 알립니다. `--browser bundled`/`system`으로 고정할 수 있고 Snap 패키지 Chromium은 홈의 숨김 디렉터리 접근 제한 때문에 후순위입니다.
+- `--doctor`가 공용 도우미 상태(`sandbox_helper`), 설치된 시스템 브라우저 목록(`system_browsers`), 브라우저 정책, 대체 실행 검사 결과(`sandbox.fallback`)를 함께 돌려주고, 실제 실행이 성공하면 정적 AppArmor 판정을 참고 사항으로 낮춥니다. 새 코드 `SANDBOX_HELPER_INVALID`(도우미 손상), `SYSTEM_BROWSER_MISSING`. `--uninstall-sandbox`는 도우미와 정책을 함께 제거합니다. 어떤 경로에서도 `--no-sandbox`를 자동으로 사용하지 않는 원칙은 유지됩니다.
+
+### 2. 탐색 응답의 네트워크 이벤트 URL 제거
+
+- 관측 응답(`navigate`/`snapshot`/`find` 외 `action`/`wait`)이 이벤트 원문 배열 대신 `activity` 집계(`events` 수, `by_type` 종류별 개수, `redirects`, `frame_navigations`, `final_url`, 오류성 이벤트 최대 5건의 호스트+경로 축약 URL, `errors_total`, `since`/`cursor`)만 싣습니다. 광고/추적 iframe 탐색과 요청 실패 이벤트의 수백 자 URL이 응답의 절반 이상을 차지하던 문제가 사라졌습니다.
+- 원문이 필요하면 `include_events=true`를 지정하거나 `events` 명령에 `since=activity.since`를 넘깁니다. 요약의 `errors.events`도 최근 3건·축약 URL·`event_counts`로 줄였고 경고 메시지는 120자로 자릅니다.
+
+### 3. 빈 껍데기/차단 페이지를 성공으로 보고하지 않음 — 로딩 품질 검증
+
+- `navigate`가 `load` 뒤에 readiness.js 신호(본문/내용 영역 텍스트 길이, SPA 루트 비어 있음, 스켈레톤/스피너, 보안 문자 프레임·스크립트·요소, 로그인 폼, 링크/입력/버튼 수, 구조화 데이터)를 모아 `ready`/`loading`/`empty`/`blocked`/`login_required`/`http_error`/`error`로 분류하고 `verification.content_ready`와 `readiness{status,reasons,kind,waited_ms,checks,attempts,signals,probe,hint}`를 돌려줍니다.
+- 늦게 채워지는 SPA는 제한 시간(`ready.timeout_ms`, 기본 8초 이내) 안에서 DOM/네트워크가 조용해질 때까지 기다리고, 끝까지 빈 껍데기면 한 번 새로 고쳐(`ready.retry`, 기본 1) 다시 판정합니다. 그래도 `empty`면 `PAGE_EMPTY`, 보안 문자/차단 문구/HTTP 403·429면 `PAGE_BLOCKED` 오류로 근거(`readiness.signals.captcha` 등)와 다음 조치(`hint`)를 함께 돌려줍니다. 차단은 재시도하지 않습니다(차단 강화 방지). AliExpress 상세 페이지의 `_____tmd_____/punish` 보안 문자 프레임은 `blocked`로, 벤치마크에서 본 "제목 없는 껍데기"(머리글/바닥글 링크만 있고 앱 루트가 비어 있음)는 `no_title`/`text_below_min` 사유의 `empty`로 보고됩니다.
+- `ready={min_text, selector, text, timeout_ms, retry, on_fail}`로 기준을 바꾸고(`on_fail=warn`이면 오류 대신 `content_ready=false` 성공 응답), `ready=false`로 검사를 생략할 수 있습니다. 작은 정적 문서(노드 수십 개, SPA 루트 없음)는 텍스트가 적어도 빈 껍데기로 보지 않으며, 로그인 페이지와 HTTP 오류 문서는 오류가 아닌 상태로 구분합니다.
+- 검증이 켜져 있으면 `load`는 2초만 기다립니다. 광고/추적 자원 때문에 `load`가 10초 넘게 지연되는 페이지에서 본문이 완성된 즉시 응답합니다(다나와 상세 13.5초 → 6.1초).
+
+### 4. 품질 확인·재시도 부담 축소 — 한 왕복에 더 많이, 더 작게
+
+- `navigate.include=["records","product","state","events"]`와 `extract={...}`로 탐색 응답에 레코드 추출, 상품 요약, 정렬/페이지 상태를 함께 싣습니다. 새 `batch` 명령은 최대 20개 명령을 순차 실행해 결과 배열(`results`, `completed`, `failed`, `stopped_at`)을 돌려주며 기본으로 첫 실패에서 멈춥니다.
+- 요약에 `kind`(listing/product/login/article/other)를 추가하고 `omitted.next` 추천 명령을 종류별로 바꿨습니다(목록은 `extract`→`page.state`, 상세는 `page.product`).
+- `extract` 응답에 `quality{confidence=high|medium|low|none, coverage{필드: 비율}, records, hint}`를 추가해 자동 감지가 상품 목록을 제대로 잡았는지 재조회 없이 판단할 수 있습니다.
+- 요약 모드(`navigate` 기본)는 Chromium AX 보강을 생략해 대형 페이지 관측을 수 초 단축합니다. 요약 기준선과 이후 AX 보강 관측의 이름/역할/상태 차이는 변경분으로 보고하지 않습니다.
+
+### 5. 사이트별 선택자·후처리 없이 쓰는 추출 — Chrome 방식의 단점 보완
+
+- **붙어 출력되는 텍스트 해결**: 요소 텍스트를 innerText 대신 textlib.js의 경계 규칙으로 조립합니다. 블록 경계는 공백, 인라인 경계는 앞 조각이 통화 기호·`.`·`,`로 끝나거나 뒤 조각이 `.`·`,`로 시작할 때만 붙입니다. `<span>₩12,345</span><span>1,000+ 판매</span>`는 "₩12,345 1,000+ 판매"로, `<span>US $</span><span>12</span><span>.</span><span>34</span>`는 "US $12.34"로 읽힙니다. `query`/`extract`의 `text` 필드와 모든 해석기가 이 텍스트를 씁니다.
+- **자동 필드 확장**: 레코드 자동 필드에 `original_price`(취소선/원가 요소 또는 할인율이 있을 때 더 큰 가격), `discount`(%), `sold`(`{raw,value,plus}`: "1,000+ 판매", "sold 2.3K", "구매 345"; "판매 1위" 같은 순위는 제외), `rating`(평점/별점/★//5/점/"(리뷰 수)" 문맥이 있는 0~5만 인정해 "0.5x200mm" 같은 치수를 배제), `reviews`("리뷰수 ( 6 )", "1,234 reviews"), `shipping`을 추가했습니다. `query.fields`에 `sold`/`rating`/`reviews`/`discount`, 필드 명세 `type`에 `count`/`rating`을 추가했습니다. 가격 해석기는 `US $12.34`, `₩12,345`, `12,345 원`, `KRW 6200` 등 접두/접미 통화를 ISO 코드로 통일합니다.
+- **상품 상세 요약 `page.product`**: JSON-LD(schema.org Product/Offer/AggregateRating) → 마이크로데이터 → Open Graph/`product:price` 메타 → DOM 휴리스틱(h1, 가장 큰 글자의 가격 요소, 취소선 원가, 판매량/평점/리뷰/배송/재고 문구, 판매자, 옵션 select/sku 그룹, 큰 이미지) 순으로 합쳐 `{title, price, original_price, discount, sold, rating, reviews, shipping, availability, brand, seller, sku, options, images, description}`과 필드별 출처(`sources`), `detected`/`confidence`, 제목/가격 요소 ID를 돌려줍니다. 다나와 상세는 JSON-LD로 800바이트에 요약됩니다.
+
+### 그 밖의 변경
+
+- `capabilities`에 `browser_policy`, `browser`(실제 실행 파일/대체 사유), `readiness_statuses`, `navigate_includes`, `record_auto_fields`를 추가했습니다.
+- 이벤트 `navigation_retry`, `browser_fallback`, `browser_selected`를 추가했습니다. 오류 코드 `PAGE_EMPTY`, `PAGE_BLOCKED`, `SANDBOX_HELPER_INVALID`, `SYSTEM_BROWSER_MISSING`을 추가했습니다.
+- CLI: `--browser auto|bundled|system`, `--sandbox-method auto|helper|apparmor|suid`(기본 auto=helper). 설치 검증은 번들 Chromium 자체의 샌드박스 실행을 확인합니다.
+- GitHub Actions의 Ubuntu 24.04 작업이 공용 도우미 설치 → 다른 경로로 복사한 Chromium의 샌드박스 실행 → 도우미 제거 후 경로 독립 AppArmor 정책 설치 → 같은 경로의 실행을 순서대로 검증합니다.
+- 테스트 사이트에 붙은 텍스트 상품 카드(`/market`), JSON-LD 상품 상세(`/product/1`), 늦게 채워지는 SPA(`/shell`), 빈 껍데기(`/shell-empty`), 보안 문자 프레임(`/blocked`), 403(`/forbidden`), 로그인 폼(`/login`) 페이지와 v0.2.0 통합 테스트(`tests/test_v020.py`)를 추가했습니다.
+- 문서: `docs/PROTOCOL.md`(0.2.0 기본 동작, readiness/activity/include/batch/page.product), `docs/FEATURES.md`, `docs/SANDBOX.md`(공용 도우미·경로 독립 정책·시스템 브라우저), README를 갱신했습니다.
+
+### 호환성
+
+- 관측 응답에서 `events` 배열이 사라지고 `activity` 집계가 들어갑니다. 원문이 필요하면 `include_events=true` 또는 `events(since)`를 쓰세요. `cursor`는 유지됩니다.
+- `navigate`는 빈 껍데기/차단 페이지에서 `PAGE_EMPTY`/`PAGE_BLOCKED` 오류를 돌려줍니다. 0.1.0 동작이 필요하면 `ready=false`(검사 생략) 또는 `ready={"on_fail":"warn"}`을 지정하세요. HTTP 404/500 문서는 여전히 성공 응답이며 `readiness.status=http_error`입니다.
+- `extract` 자동 필드에 선택 필드가 추가됐고 `text`는 경계 규칙으로 조립한 문자열입니다. `extract` 응답에 `quality`가 추가됐습니다.
+- `--install-sandbox`의 기본 방식이 AppArmor 정책에서 공용 setuid 도우미로 바뀌었습니다. 기존 0.1.0 정책은 그대로 유효하며 `--sandbox-method apparmor`로 경로 독립 정책으로 갱신할 수 있습니다.
+
 ## 0.1.0 — 2026-10-12
 
 AI Agent의 토큰 사용량 절감, 작업 결과의 정확성, 무인 운영 안정성을 목표로 한 개선 릴리스입니다. 실사용 검증 보고서의 P0~P2 15개 요구사항을 구현했습니다. 기본 동작이 바뀐 항목은 `docs/PROTOCOL.md`의 "0.1.0에서 달라진 기본 동작"을 참고하세요.

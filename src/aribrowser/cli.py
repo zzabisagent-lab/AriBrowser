@@ -8,6 +8,13 @@ v0.1.0 추가 옵션:
 - `--uninstall-sandbox`: AppArmor 정책을 제거한다.
 - `--cleanup`: 이전 세션이 남긴 Chromium 프로세스와 프로필 잠금을 정리한다.
 - `--max-bytes`: 관측 명령 응답의 세션 기본 바이트 상한(0이면 무제한).
+
+v0.2.0 추가 옵션:
+- `--browser auto|bundled|system`: 번들 Chromium이 샌드박스 문제로 실행되지 않으면 설치된
+  Chrome/Chromium/Edge/Brave로 대체(auto, 기본). `--no-sandbox`로 대체하지 않는다.
+- `--sandbox-method auto|helper|apparmor|suid`: 기본 `auto`(=helper)는 공용 setuid 도우미를
+  고정 경로에 한 번 설치해 설치 경로와 무관하게 동작한다. `apparmor`는 모든 사용자 캐시와
+  배포 디렉터리 구조에 붙는 정책을 설치한다. `suid`는 v0.1.0 방식(설치 디렉터리 안)이다.
 """
 
 import argparse
@@ -37,6 +44,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--timeout-ms", type=int, default=10000)
     result.add_argument("--media", choices=["defer", "allow"], default="defer")
     result.add_argument("--chromium", help="직접 설치한 Chromium 실행 파일 경로")
+    result.add_argument("--browser", choices=["auto", "bundled", "system"], default="auto",
+                        help="auto: 번들 Chromium, 샌드박스 불가 시 시스템 Chrome/Chromium/Edge/Brave로 대체. bundled/system: 해당 브라우저만.")
     result.add_argument("--max-bytes", type=int, default=500_000, help="관측 응답의 기본 바이트 상한(0=무제한, 요청별 max_bytes로 재지정)")
     result.add_argument("--snapshot", metavar="URL", help="URL을 읽고 전체 화면을 출력한 뒤 종료합니다.")
     result.add_argument("--format", choices=["json", "text"], default="json")
@@ -45,7 +54,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--no-launch", action="store_true", help="--doctor에서 실제 Chromium 실행 검사를 생략합니다.")
     result.add_argument("--install-sandbox", action="store_true", help="Linux 번들 Chromium 샌드박스 정책을 설치/갱신합니다(root).")
     result.add_argument("--uninstall-sandbox", action="store_true", help="설치한 AppArmor 정책을 제거합니다(root).")
-    result.add_argument("--sandbox-method", choices=["apparmor", "suid"], default="apparmor")
+    result.add_argument("--sandbox-method", choices=["auto", "helper", "apparmor", "suid"], default="auto",
+                        help="helper(기본): 공용 setuid 도우미를 /usr/local/lib/aribrowser에 한 번 설치. apparmor: 경로 독립 AppArmor 정책. suid: 설치 디렉터리 안 도우미(0.1.0 방식).")
     result.add_argument("--cleanup", action="store_true", help="이전 세션의 잔여 Chromium 프로세스와 프로필 잠금을 정리합니다.")
     return result
 
@@ -65,7 +75,7 @@ def config_from(args) -> Config:
     return Config(data_dir=args.data_dir, headless=not args.headed, no_sandbox=args.no_sandbox,
                   width=args.width, height=args.height, mobile=args.mobile,
                   timeout_ms=args.timeout_ms, media_policy=args.media, executable_path=args.chromium,
-                  max_bytes=args.max_bytes)
+                  max_bytes=args.max_bytes, browser=args.browser)
 
 
 async def run_doctor(args) -> int:
@@ -108,7 +118,7 @@ def demoted_doctor(args, user: str) -> dict | None:
     except KeyError:
         return None
     command = [sys.executable, "--doctor"] if getattr(sys, "frozen", False) else [sys.executable, "-m", "aribrowser", "--doctor"]
-    command += ["--data-dir", str(args.data_dir)]
+    command += ["--data-dir", str(args.data_dir), "--browser", "bundled"]
     if args.chromium:
         command += ["--chromium", args.chromium]
 
@@ -139,7 +149,10 @@ async def run_install_sandbox(args) -> int:
         print(encode({"install": {"status": "failed", "code": "CHROMIUM_MISSING", "reason": sandbox.DOCTOR_CODES["CHROMIUM_MISSING"]},
                       "chromium": layout}), flush=True)
         return 1
-    if args.sandbox_method == "suid":
+    method = "helper" if args.sandbox_method == "auto" else args.sandbox_method
+    if method == "helper":
+        result = sandbox.install_helper(executable)
+    elif method == "suid":
         result = sandbox.install_suid(layout["directory"])
     else:
         result = sandbox.install_apparmor(layout["browsers_root"])
@@ -151,6 +164,7 @@ async def run_install_sandbox(args) -> int:
             verification = demoted_doctor(args, sudo_user) if sudo_user and sudo_user != "root" else None
             output["verification"] = verification or {"skipped": True, "reason": "root는 Chromium 샌드박스를 사용할 수 없으므로 일반 사용자로 --doctor를 실행해 검증하세요."}
         else:
+            config.browser = "bundled"  # 설치 검증은 번들 Chromium 자체가 샌드박스로 실행되는지 본다.
             report = await sandbox.doctor(config, launch=True)
             output["verification"] = {"ok": report["summary"]["ok"], "error_code": report["summary"]["error_code"],
                                       "sandbox": report.get("sandbox")}
@@ -217,9 +231,9 @@ def main() -> None:
             print(encode(processes.cleanup(args.data_dir)), flush=True)
             raise SystemExit(0)
         if args.uninstall_sandbox:
-            result = sandbox.uninstall_apparmor()
+            result = {"helper": sandbox.uninstall_helper(), "apparmor": sandbox.uninstall_apparmor()}
             print(encode(result), flush=True)
-            raise SystemExit(2 if result["status"] == "needs_root" else 0)
+            raise SystemExit(2 if any(r["status"] == "needs_root" for r in result.values()) else 0)
         if args.install_sandbox:
             raise SystemExit(asyncio.run(run_install_sandbox(args)))
         if args.doctor:

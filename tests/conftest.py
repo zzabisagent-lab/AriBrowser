@@ -91,6 +91,48 @@ document.querySelector('#async-sort').onclick = () => setTimeout(() => fetch('/a
 </script></html>"""
 
 
+# v0.2.0 검증용 페이지들.
+# MARKET: 인라인 요소가 공백 없이 붙은 상품 카드(가격·원가·할인·판매량·평점·리뷰·배송) — 텍스트 경계 규칙과 자동 필드 검증.
+MARKET = """<!doctype html><html lang="ko"><meta charset="utf-8"><title>마켓 검색</title>
+<style>.card{margin:4px;padding:4px;border:1px solid #ccc} .orig{text-decoration:line-through}</style>
+<header><nav><a href="/">홈</a><a href="/market">마켓</a></nav></header>
+<main><h1>마켓 결과</h1><p class="total">총 4개 상품</p>
+<ul id="cards">
+<li class="card"><a class="tit" href="/product/1">무선 이어폰 A</a><div class="p"><span class="price">₩12,345</span><span class="orig">₩15,000</span><span class="dc">18%↓</span></div><span class="sold">1,000+ 판매</span><span class="star">★4.5 (1,234)</span><span class="ship">무료배송</span><img src="/one.png" alt="A"></li>
+<li class="card"><a class="tit" href="/product/2">USB 케이블 B</a><div class="p"><span class="price"><span>US $</span><span>12</span><span>.</span><span>34</span></span></div><span class="sold">sold 2.3K</span><span class="star">4.8 (56)</span><img src="/two.png" alt="B"></li>
+<li class="card"><a class="tit" href="/product/3">아크릴 판 0.5x200x300mm</a><div class="p"><span class="price">990원</span></div><span class="rv">상품리뷰 별점 4.7 리뷰수 ( 4 )</span></li>
+<li class="card"><a class="tit" href="/product/4">판매 1위 키보드 D</a><div class="p"><span class="price">35,000</span><span>원</span></div><span class="sold">구매 345</span></li>
+</ul></main><footer>고객센터 · 이용약관 · 개인정보처리방침</footer></html>"""
+
+# PRODUCT_PAGE: JSON-LD/Open Graph/DOM(취소선 원가, 옵션, 판매자)이 섞인 상품 상세.
+PRODUCT_PAGE = """<!doctype html><html lang="ko"><meta charset="utf-8"><title>무선 이어폰 A - 마켓</title>
+<meta property="og:title" content="무선 이어폰 A"><meta property="og:type" content="product"><meta property="og:image" content="/one.png">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"무선 이어폰 A","brand":{"@type":"Brand","name":"아리"},"sku":"A-1","image":["/one.png"],
+"offers":{"@type":"Offer","price":"12345","priceCurrency":"KRW","availability":"https://schema.org/InStock","seller":{"@type":"Organization","name":"아리스토어"}},
+"aggregateRating":{"@type":"AggregateRating","ratingValue":"4.5","reviewCount":"1234"}}</script>
+<main><h1>무선 이어폰 A</h1><div class="price-box"><span class="price" style="font-size:24px">12,345원</span> <del class="price-orig">15,000원</del> <em>18% 할인</em></div>
+<p class="meta">1,000+ 구매 · 평점 4.5 (1,234) · 무료배송</p>
+<label>색상 <select id="color"><option>검정</option><option>흰색</option></select></label>
+<div class="sku-property"><div class="title">용량</div><ul><li>32GB</li><li>64GB</li></ul></div>
+<p class="description">노이즈 캔슬링을 지원하는 무선 이어폰입니다.</p><button>장바구니</button></main></html>"""
+
+# SHELL: SPA 루트가 비어 있다가 1.2초 뒤 채워지는 페이지(로딩 대기 → ready). SHELL_EMPTY: 끝까지 비어 있는 빈 껍데기.
+SHELL = """<!doctype html><html><meta charset="utf-8"><title>로딩</title><div id="root"></div>
+<script>setTimeout(() => { document.querySelector('#root').innerHTML = '<main><h1>늦게 채워진 상품</h1><p>' + '내용 '.repeat(60) + '</p><span class="price">9,900원</span></main>'; }, 1200);</script></html>"""
+SHELL_EMPTY = """<!doctype html><html><meta charset="utf-8"><title>빈 껍데기</title><div id="root"></div><script>window.__app = {};</script></html>"""
+# SHELL_CHROME: 제목 없음, 시맨틱 태그 없는 머리글/바닥글 링크만 있고 앱 루트는 채워지지 않은 껍데기(시스템 Chrome에서 본 AliExpress 상세 형태).
+SHELL_CHROME = """<!doctype html><html><meta charset="utf-8"><title></title>
+<div class="site-header"><a href="/">AliMarket</a> <a href="/help">도움말</a> <a href="/cart">장바구니</a> <a href="/orders">주문</a> <a href="/account">계정</a></div>
+<div id="root"><div class="pdp-wrap"></div></div>
+<div class="site-footer"><p>고객센터, 분쟁 및 신고, 서비스 약속 안내, 지적 재산권 침해 신고, 윤리 위반 신고, 투명성 센터, 반품정책</p>
+<p>글로벌 사이트 Русский Portuguese Spanish French German Italian Dutch Turkish Japanese Korean Thai Arabic Hebrew Polish</p>
+<p>Browse by Category 인기 전체 제품 프로모션 저가 상품 리뷰 블로그 판매자 포털 앱 다운로드 파트너 제휴 프로그램 개인정보 처리방침 이용약관</p>
+<ul><li><a href="/a">a</a></li><li><a href="/b">b</a></li><li><a href="/c">c</a></li><li><a href="/d">d</a></li><li><a href="/e">e</a></li><li><a href="/f">f</a></li></ul></div>
+<script>for (let i = 0; i < 80; i++) document.querySelector('#root > div').appendChild(document.createElement('span'));</script></html>"""
+BLOCKED = """<!doctype html><html><meta charset="utf-8"><title>Verify</title><p>Please verify you are human</p><iframe src="/captcha/_____tmd_____/punish" style="width:300px;height:200px"></iframe></html>"""
+LOGIN = """<!doctype html><html lang="ko"><meta charset="utf-8"><title>로그인</title><form><label>아이디 <input name="id"></label><label>비밀번호 <input type="password" name="pw"></label><button>로그인</button></form></html>"""
+
+
 @pytest.fixture(scope="session")
 def site():
     """파일·오류·리디렉션·교차 출처 프레임을 제공하며 자원별 실제 요청 횟수를 센다."""
@@ -109,6 +151,24 @@ def site():
                 body = HTML.replace("PORT", str(self.server.server_port)).encode()
             elif self.path.startswith("/products"):
                 body = PRODUCTS.encode()
+            elif self.path.startswith("/market"):
+                body = MARKET.encode()
+            elif self.path == "/product/1":
+                body = PRODUCT_PAGE.encode()
+            elif self.path == "/shell":
+                body = SHELL.encode()
+            elif self.path == "/shell-empty":
+                body = SHELL_EMPTY.encode()
+            elif self.path == "/shell-chrome":
+                body = SHELL_CHROME.encode()
+            elif self.path == "/blocked":
+                body = BLOCKED.encode()
+            elif self.path == "/forbidden":
+                status, body = 403, b"<h1>Access Denied</h1><p>Request blocked.</p>"
+            elif self.path == "/login":
+                body = LOGIN.encode()
+            elif self.path.startswith("/captcha/"):
+                body = b"<p>slide to verify</p>"
             elif self.path == "/api/slow":
                 # SPA 비동기 로딩을 흉내 내는 느린 JSON 응답.
                 time.sleep(0.4)

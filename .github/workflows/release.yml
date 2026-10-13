@@ -75,15 +75,33 @@ jobs:
         run: |
           python -m aribrowser --doctor > doctor-before.json || true
           python -c "import json; d=json.load(open('doctor-before.json')); print(json.dumps(d['summary'], ensure_ascii=False)); print('userns', d['userns']); print('apparmor', d['apparmor'])"
-      - name: Install sandbox policy as root and verify as the runner user
+      - name: Install the shared sandbox helper as root (default method) and verify as the runner user
         run: |
           sudo -E env "PATH=$PATH" python -m aribrowser --install-sandbox > install.json
-          python -c "import json; d=json.load(open('install.json')); print(json.dumps({k: v for k, v in d.items() if k != 'chromium'}, ensure_ascii=False)); assert d['install']['status'] in {'installed', 'not_needed'}, d"
-      - name: Sandboxed self-test and doctor
+          python -c "import json; d=json.load(open('install.json')); print(json.dumps({k: v for k, v in d.items() if k != 'chromium'}, ensure_ascii=False)); assert d['install']['status'] in {'installed', 'not_needed'}, d; assert d['install'].get('method', 'helper') == 'helper', d"
+      - name: Sandboxed self-test and doctor with the helper (bundled Chromium, no AppArmor policy)
         run: |
-          python -m aribrowser --self-test
-          python -m aribrowser --doctor > doctor-after.json
-          python -c "import json; d=json.load(open('doctor-after.json')); print(json.dumps(d['summary'], ensure_ascii=False)); assert d['summary']['ok'] and d['sandbox']['sandbox_active'], d['summary']"
+          python -m aribrowser --self-test --browser bundled
+          python -m aribrowser --doctor --browser bundled > doctor-helper.json
+          python -c "import json; d=json.load(open('doctor-helper.json')); print(json.dumps(d['summary'], ensure_ascii=False)); assert d['summary']['ok'] and d['sandbox']['sandbox_active'] and d['sandbox_helper']['installed'], d['summary']"
+      - name: Helper works for a copy of the install in a different path (install-path independence)
+        run: |
+          mkdir -p /tmp/elsewhere/aribrowser/_internal/playwright/driver/package/.local-browsers
+          cp -r ~/.cache/ms-playwright/chromium-* /tmp/elsewhere/aribrowser/_internal/playwright/driver/package/.local-browsers/
+          CHROME=$(ls -d /tmp/elsewhere/aribrowser/_internal/playwright/driver/package/.local-browsers/chromium-[0-9]*/chrome-linux*/chrome | head -n 1)
+          python -m aribrowser --doctor --browser bundled --chromium "$CHROME" > doctor-elsewhere.json
+          python -c "import json; d=json.load(open('doctor-elsewhere.json')); print(json.dumps(d['summary'], ensure_ascii=False)); assert d['summary']['ok'] and d['sandbox']['sandbox_source'] == 'setuid_helper', d['summary']"
+      - name: Remove the helper and install the path-independent AppArmor policy instead
+        run: |
+          sudo -E env "PATH=$PATH" python -m aribrowser --uninstall-sandbox
+          python -m aribrowser --doctor --browser bundled > doctor-none.json || true
+          python -c "import json; d=json.load(open('doctor-none.json')); print(json.dumps(d['summary'], ensure_ascii=False)); assert d['summary']['error_code'] in {'SANDBOX_USERNS_RESTRICTED', None}, d['summary']"
+          sudo -E env "PATH=$PATH" python -m aribrowser --install-sandbox --sandbox-method apparmor > install-apparmor.json
+          python -c "import json; d=json.load(open('install-apparmor.json')); print(json.dumps({k: v for k, v in d.items() if k != 'chromium'}, ensure_ascii=False)); assert d['install']['status'] in {'installed', 'not_needed'}, d"
+          CHROME=$(ls -d /tmp/elsewhere/aribrowser/_internal/playwright/driver/package/.local-browsers/chromium-[0-9]*/chrome-linux*/chrome | head -n 1)
+          python -m aribrowser --doctor --browser bundled --chromium "$CHROME" > doctor-after.json
+          python -c "import json; d=json.load(open('doctor-after.json')); print(json.dumps(d['summary'], ensure_ascii=False)); assert d['summary']['ok'] and d['sandbox']['sandbox_active'] and d['apparmor']['profile_covers_current'], d['summary']"
+          python -m aribrowser --self-test --browser bundled
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -91,6 +109,10 @@ jobs:
           path: |
             doctor-before.json
             install.json
+            doctor-helper.json
+            doctor-elsewhere.json
+            doctor-none.json
+            install-apparmor.json
             doctor-after.json
 
   release:

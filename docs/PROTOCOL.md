@@ -1,4 +1,4 @@
-# AriBrowser JSONL v1 (0.1.0)
+# AriBrowser JSONL v1 (0.2.0)
 
 UTF-8 JSON 객체 하나를 한 줄에 전송합니다. 요청은 순차 실행되며 `id`가 응답에 그대로 전달됩니다. 브라우저는 첫 프로필/탐색 요청에서 시작됩니다. EOF 또는 `close`에서 정상 종료하며 세션 저장소를 보존합니다. GUI 대신 로컬 프로세스 파이프를 연결하는 Agent용 브라우저입니다.
 
@@ -7,6 +7,20 @@ UTF-8 JSON 객체 하나를 한 줄에 전송합니다. 요청은 순차 실행�
 ```
 
 성공은 `{"id":...,"ok":true,"result":...}`, 실패는 `{"id":...,"ok":false,"error":{"code":...,"message":...,"details":...}}`입니다. 잘못된 JSON이나 명령 이후에도 연결은 유지됩니다. 작업 실패는 롤백을 뜻하지 않습니다. `snapshot`/`events`로 실제 결과를 확인한 뒤 재시도하세요. 알 수 없는 매개변수는 `INVALID_ARGUMENT`이며 `details.allowed`에 허용 목록을 돌려줍니다.
+
+## 0.2.0에서 달라진 기본 동작
+
+| 항목 | 0.1.0 | 0.2.0 |
+| --- | --- | --- |
+| 관측 응답의 이벤트 | `events` 원문 배열(광고/추적 URL 포함) | `activity` 집계(종류별 수, 오류 몇 건의 축약 URL). 원문은 `include_events=true` 또는 `events(since)` |
+| `navigate` 성공 조건 | `load` 완료(빈 껍데기도 성공) | 로딩 품질 검증: `readiness.status`가 `empty`/`blocked`면 `PAGE_EMPTY`/`PAGE_BLOCKED` 오류. `ready=false`로 생략, `ready.on_fail=warn`으로 경고화 |
+| `navigate`의 `load` 대기 | 최대 10초 | 검증이 켜져 있으면 2초(내용 판정이 대신함) |
+| `navigate` 한 번에 얻는 것 | 요약 | 요약 + `include`로 레코드/상품/상태/이벤트, 새 `batch` 명령 |
+| 요약 관측 | Chromium AX 보강 포함 | AX 보강 생략(대형 페이지 수 초 단축). 상세 모드는 그대로 |
+| `extract` 자동 필드 | title/url/price/shipping/image/text | + `original_price`/`discount`/`sold`/`rating`/`reviews`, `quality` 블록, 경계 규칙으로 조립한 `text` |
+| 상품 상세 | `query`/`snapshot`으로 직접 읽음 | `page.product`가 JSON-LD/메타/DOM을 합쳐 요약 |
+| 실행 파일 | 번들 Chromium | `--browser auto`: 번들이 샌드박스 문제로 실패하면 시스템 Chrome/Chromium/Edge/Brave |
+| 샌드박스 설치 | 설치 경로별 AppArmor 정책 | 호스트당 한 번 설치하는 공용 setuid 도우미(기본) 또는 경로 독립 AppArmor 정책 |
 
 ## 0.1.0에서 달라진 기본 동작
 
@@ -26,11 +40,11 @@ UTF-8 JSON 객체 하나를 한 줄에 전송합니다. 요청은 순차 실행�
 
 `tab`을 받는 명령에서 생략하면 현재 활성 탭을 사용합니다. `profile`은 프로필 이름입니다. ID는 응답에서 받은 값을 그대로 사용하며 CSS 선택자/좌표로 해석하지 않습니다(`query`/`extract`의 `scope`/`container`만 예외적으로 ID 또는 CSS 선택자를 받습니다).
 
-공통 **출력 옵션**(아래 표의 `VIEW`): `format=text|elements|both|summary`, `fields=[...]`, `compact=true`, `max_bytes`, `max_elements`, `max_tokens`.
+공통 **출력 옵션**(아래 표의 `VIEW`): `format=text|elements|both|summary`, `fields=[...]`, `compact=true`, `max_bytes`, `max_elements`, `max_tokens`, `include_events=false`.
 
 | 명령 | params | 동작 |
 | --- | --- | --- |
-| `capabilities` | 없음 | 버전, 명령/조작 목록, 요소 필드, 상태 기본값, 대기 조건, tokenizer, 진단 코드, OCR 가능 여부 |
+| `capabilities` | 없음 | 버전, 명령/조작 목록, 요소 필드, 상태 기본값, 대기 조건, tokenizer, 진단 코드, OCR 가능 여부, 브라우저 정책/실제 실행 파일, readiness 상태, include 종류, 자동 필드 |
 | `profile.create` | `name=default`, `viewport={width,height}`, `mobile=false`, `device_scale_factor=1`, `media_policy=defer` | 영구 프로필 열기; 잔여 잠금은 복구, 사용 중 잠금은 `PROFILE_LOCKED` |
 | `profile.list` | 없음 | 열린 프로필과 자원 정책 |
 | `profile.close` | `name` | 프로필 종료; 프로세스 종료/잔여 수와 잠금 해제 여부 반환 |
@@ -38,14 +52,16 @@ UTF-8 JSON 객체 하나를 한 줄에 전송합니다. 요청은 순차 실행�
 | `tab.list` | 없음 | ID, 프로필, URL, 제목, 활성/로딩/충돌 상태 |
 | `tab.switch` | `tab` | 활성 탭 전환 및 요약 |
 | `tab.close` | `tab?` | 탭 종료 및 남은 탭 목록 |
-| `navigate` | `url`, `tab?`, `mode=summary`, `settle_ms=150`, `expect?`, `limit`, `offset`, `include_hidden`, `region`, `max_regions=20`, `max_headings=12`, VIEW | 탐색 후 요약/변경분/화면과 `verification` |
+| `navigate` | `url`, `tab?`, `mode=summary`, `settle_ms=150`, `expect?`, `ready=true`, `include=[]`, `extract={}`, `limit`, `offset`, `include_hidden`, `region`, `max_regions=20`, `max_headings=12`, VIEW | 탐색 → 로딩 품질 검증(재시도) → 요약/변경분/화면 + `verification` + `readiness` + include 결과 |
 | `snapshot` | `tab?`, `mode=full`, `region?`, `offset=0`, `limit=500`, `include_hidden=false`, `max_regions`, `max_headings`, VIEW | 요약/전체/부분/변경분 관측 |
 | `find` | `tab?`, `text?`, `role?`, `region?`, `actionable?`, `include_hidden=true`, `offset=0`, `limit=100`, `match=contains`, `operator=and`, `in=[name,text,value]`, `sort_by=document`, `dedupe=false`, `with_parent=0`, `with_children=0`, `child_roles?`, VIEW | 검색; 아래 "검색" 참고 |
 | `detail` | `element`, `tab?`, `radius=2`, `fields?`, `compact=false` | 상세(`internal_id` 포함), 조상, 직계 자식, 앞뒤 문맥 |
 | `table` | `element`, `tab?`, `rows?`, `columns?` | 표의 선택한 행/열; 인덱스는 0부터 시작하며 헤더 행 포함 |
-| `query` | `tab?`, `frame?`, `selector`, `scope?`, `fields=[id,tag,text,href]`, `attributes=[]`, `text?`, `match=contains`, `include_hidden=false`, `offset=0`, `limit=100`, `dedupe=false`, `max_text=500`, `max_bytes`, `max_elements`, `max_tokens` | 브라우저 내부 CSS 선택자 질의 |
-| `extract` | `tab?`, `frame?`, `container?`, `item?`, `fields?`, `text?`, `match`, `include_hidden=false`, `offset=0`, `limit=50`, `dedupe=false`, `max_text=500`, `max_bytes`, `max_elements`, `max_tokens` | 반복 레코드 구조화 추출 |
+| `query` | `tab?`, `frame?`, `selector`, `scope?`, `fields=[id,tag,text,href]`, `attributes=[]`, `text?`, `match=contains`, `include_hidden=false`, `offset=0`, `limit=100`, `dedupe=false`, `max_text=500`, `max_bytes`, `max_elements`, `max_tokens` | 브라우저 내부 CSS 선택자 질의(필드에 `sold`/`rating`/`reviews`/`discount` 포함) |
+| `extract` | `tab?`, `frame?`, `container?`, `item?`, `fields?`, `text?`, `match`, `include_hidden=false`, `offset=0`, `limit=50`, `dedupe=false`, `max_text=500`, `max_bytes`, `max_elements`, `max_tokens` | 반복 레코드 구조화 추출 + `quality` |
 | `page.state` | `tab?`, `compare?` | 정렬/필터/페이지/전체 건수/페이지당 수/검색어/토글과 `fingerprint` |
+| `page.product` | `tab?` | 상품 상세 요약(제목/가격/원가/할인/판매량/평점/리뷰/배송/재고/브랜드/판매자/옵션/이미지)과 출처 |
+| `batch` | `steps=[{command, params, id?}]`(1~20), `stop_on_error=true` | 여러 명령을 한 왕복에 순차 실행; `batch`/`close`는 포함 불가 |
 | `action` | `action`, `tab?`, `expect?`, `verify=true`, `mode=changes`, `settle_ms=150`, 조작 매개변수, `limit`, `offset`, `include_hidden`, `region`, VIEW | 입력 후 변경분 + `verification` + `delta` |
 | `render` | 아래 렌더 매개변수 | 요청 범위 PNG 및 메타데이터 |
 | `media.load` | `tab?`, `element?` | 해당 요소와 하위 이미지 로딩; 요소 생략 시 주 문서 |
@@ -71,7 +87,52 @@ UTF-8 JSON 객체 하나를 한 줄에 전송합니다. 요청은 순차 실행�
 - `text`(기본): `text` 필드에 들여쓰기된 화면. 한 줄은 `[ID role flags] "이름" = 값 -> href` 형태이며 ID는 JSON과 같습니다.
 - `elements`: `elements` 배열만. `both`: 둘 다. `summary`: `mode=summary`와 같습니다.
 
-`summary` 응답: `page`(제목/URL/로딩/HTTP 상태/인증/뷰포트/`stability`), `counts`(전체/표시/숨김/상호작용/링크/버튼/입력/폼/이미지/제목/표/목록/프레임/역할별), `regions`(랜드마크 ID/역할/이름/하위 요소 수), `headings`, `search_box`, `errors`(HTTP 상태/인증/알림/유효성 오류/오류 이벤트/경고), `omitted.elements`와 `omitted.next`(권장 후속 명령).
+`summary` 응답: `page`(제목/URL/로딩/HTTP 상태/인증/뷰포트/`stability`), `kind`(페이지 종류 추정: `listing`/`product`/`login`/`article`/`other`), `counts`(전체/표시/숨김/상호작용/링크/버튼/입력/폼/이미지/제목/표/목록/프레임/역할별), `regions`(랜드마크 ID/역할/이름/하위 요소 수), `headings`, `search_box`, `errors`(HTTP 상태/인증/알림/유효성 오류/최근 오류 이벤트 3건(축약 URL)/`event_counts`/경고), `omitted.elements`와 `omitted.next`(페이지 종류별 권장 후속 명령). 요약 관측은 Chromium AX 보강을 생략합니다(이름은 DOM/ARIA 기준).
+
+### 활동 집계(`activity`)
+
+모든 관측 응답은 이벤트 원문 대신 다음 집계를 싣습니다.
+
+```json
+{"since":30,"cursor":64,"events":34,"by_type":{"navigation":2,"frame_navigation":12,"network_failed":12,"redirect":3},
+ "errors":[{"type":"network_failed","url":"https://analytics.google.com/g/collect","message":"net::ERR_ABORTED"}],
+ "errors_total":12,"redirects":3,"frame_navigations":12,"final_url":"https://…","events_omitted":false}
+```
+
+`errors`는 오류성 이벤트(`network_failed`, `not_found`, `authentication_required`, `server_error`, `http_error`, `script_error`, `browser_crashed`, `download_failed`, `background_error`) 최대 5건이며 URL은 호스트+경로 100자로 축약합니다. 원문이 필요하면 같은 명령에 `include_events=true`를 주거나 `events` 명령에 `since=activity.since`를 넘기세요.
+
+### 로딩 품질 검증(`navigate.ready`, `readiness`)
+
+`navigate`는 `load` 뒤에 페이지가 실제 내용을 담았는지 판정합니다. 응답의 `verification.content_ready`와 `readiness`:
+
+```json
+{"status":"ready","reasons":[],"kind":"listing","waited_ms":142,"checks":1,"attempts":1,"probe":null,
+ "signals":{"text_chars":5948,"content_text_chars":5200,"nodes":9800,"links":519,"images":117,"headings":19,"h1":"아크릴","inputs":4,
+            "password_inputs":0,"skeletons":0,"spinners":0,"app_root":null,"captcha":[],"repeated_groups":12,"prices":40,"sample":"…"}}
+```
+
+| `status` | 의미 | 응답 |
+| --- | --- | --- |
+| `ready` | 내용 텍스트가 충분하고 차단/로딩 표시가 없음 | 성공, `content_ready=true` |
+| `loading` | 제한 시간 안에 `ready.selector`/`text` 조건이 충족되지 않음 | 성공, `content_ready=false` |
+| `empty` | 제한 시간과 재시도 뒤에도 내용 텍스트가 `min_text`보다 적음(빈 껍데기, SPA 루트 비어 있음) | `PAGE_EMPTY` 오류 |
+| `blocked` | 보안 문자 프레임/스크립트/요소, 차단 문구, HTTP 403/429 | `PAGE_BLOCKED` 오류(재시도 없음) |
+| `login_required` | 비밀번호 입력이 보이고 그 밖의 내용이 거의 없음 | 성공, `content_ready=false` |
+| `http_error` | HTTP 4xx/5xx 문서(404 등) | 성공, `content_ready=false` |
+| `error` | Chromium 오류 페이지 | `NETWORK_FAILED` 오류 |
+
+`ready` 매개변수: `true`(기본), `false`(검사 생략, `readiness` 없음), 또는 `{min_text=120, selector?, text?, timeout_ms=min(--timeout-ms, 8000), retry=1, on_fail=error|warn}`. `selector`/`text`를 주면 그 요소/문구가 보일 때까지 기다립니다. `empty`/`loading`은 `retry`만큼 새로 고쳐 다시 판정하며 `navigation_retry` 이벤트를 남깁니다. 오류 응답의 `details`에는 `readiness`, `page{url,title,http_status}`, `verification`, `hint`(다음 조치), `recovery`가 있고 탭에는 현재 문서가 남아 있어 `snapshot`/`query`로 내용을 볼 수 있습니다. 작은 정적 문서(노드 수십 개, SPA 루트 없음)는 텍스트가 적어도 `ready`입니다. 판정은 휴리스틱이므로 `signals`로 근거를 확인하세요.
+
+### 한 왕복 조회(`navigate.include`, `batch`)
+
+`include`에 `records`(`extract` 매개변수는 `extract={...}`로), `product`(`page.product`), `state`(`page.state`), `events`(원문)를 주면 탐색 응답의 같은 키에 결과를 싣습니다. 각 결과는 자체 `budget`을 가집니다.
+
+```json
+{"id":1,"command":"navigate","params":{"url":"https://…/search?q=아크릴","include":["records","state"],"extract":{"limit":20,"dedupe":true}}}
+{"id":2,"command":"batch","params":{"steps":[{"command":"navigate","params":{"url":"https://…/item/1"}},{"id":"p","command":"page.product","params":{}}]}}
+```
+
+`batch` 응답: `results`(단계별 `{id, ok, result|error}`), `completed`, `failed`, `stopped_at`(실패로 멈춘 단계 번호 또는 null), `total`. 단계는 각각 검증되며 `stop_on_error=false`면 실패 뒤에도 계속합니다.
 
 `page.stability`: `network_inflight`(진행 중 요청 수), `network_quiet_ms`(마지막 네트워크 활동 이후 경과), `dom_quiet_ms`(마지막 DOM 변이 이후 경과; 추적기 미설치 문서는 null).
 
@@ -123,7 +184,7 @@ CSS 선택자로 요소를 Chromium 안에서 고르고 요청한 필드만 돌�
 
 - `selector`: CSS 선택자(1~1000자). 문법 오류는 `INVALID_ARGUMENT`입니다.
 - `scope`: 요소 ID 또는 CSS 선택자. 그 요소의 **후손**에서만 찾습니다. `frame`: 프레임 ID(기본 주 프레임).
-- `fields`: `id`, `tag`, `text`, `name`(aria-label/alt/title/placeholder), `role`, `href`(절대 URL), `src`, `value`, `visible`, `classes`, `bounds`, `price`(`{raw, value, currency}`), `number`, `attributes`. `attributes=[...]`로 지정한 속성은 `@속성명` 키로 돌려줍니다(`fields`에 `attributes`가 있으면 `attributes` 객체로).
+- `fields`: `id`, `tag`, `text`(경계 규칙으로 조립한 표시 텍스트), `name`(aria-label/alt/title/placeholder), `role`, `href`(절대 URL), `src`, `value`, `visible`, `classes`, `bounds`, `price`(`{raw, value, currency}`), `number`, `sold`(`{raw, value, plus}`), `rating`(`{raw, value, reviews?}`), `reviews`(`{raw, value, plus}`), `discount`(`{raw, percent}`), `attributes`. `attributes=[...]`로 지정한 속성은 `@속성명` 키로 돌려줍니다(`fields`에 `attributes`가 있으면 `attributes` 객체로).
 - `text`+`match`: 요소 텍스트/이름 조건. `include_hidden=false`: 숨긴 요소 제외. `dedupe`: `true`(text+href) 또는 필드 배열. `max_text`: 텍스트 길이 상한.
 - 응답: `items`, `total`(선택자 일치 수), `matched`(조건/중복 제거 후), `offset`, `next_offset`, `omitted`, `duplicates_removed`, `frame`, `budget`. `id`가 있는 항목은 바로 `action`/`detail`에 쓸 수 있습니다.
 
@@ -134,10 +195,27 @@ CSS 선택자로 요소를 Chromium 안에서 고르고 요청한 필드만 돌�
 상품 카드, 게시글, 검색 결과처럼 같은 구조가 반복되는 항목을 레코드 단위로 묶습니다. 한 레코드의 필드는 그 레코드 요소 안에서만 읽으므로 다른 레코드의 값과 섞이지 않습니다.
 
 - `container`: 요소 ID 또는 CSS 선택자(기본 문서 본문). `item`: 레코드 요소 선택자. 생략하면 같은 서명(태그+클래스)을 가진 형제가 3개 이상이고 내용이 있는 그룹을 자동 감지하며, `detection`에 방법/서명/컨테이너 ID/후보 목록을 돌려줍니다.
-- `fields` 생략 시 자동 필드: `title`, `url`, `price`, `shipping`(있을 때), `image`, `text`. 지정 시 `{이름: "선택자"}` 또는 `{이름: {selector?, attr?, type=text|number|price|url, all=false, regex?}}`. `selector`를 생략하면 레코드 요소 자체를 읽습니다. `regex`의 첫 캡처 그룹(없으면 전체 일치)을 값으로 씁니다.
+- `fields` 생략 시 자동 필드: `title`, `url`, `price`, `image`, `text`(필수 후보; 없으면 `missing`)와 있을 때만 포함하는 `original_price`(취소선/원가 요소, 또는 할인율 표기가 있을 때 더 큰 가격), `discount`(%), `shipping`, `sold`, `rating`(0~5; 평점/별점/★/점//5/"(리뷰 수)" 문맥이 있을 때만), `reviews`. 지정 시 `{이름: "선택자"}` 또는 `{이름: {selector?, attr?, type=text|number|price|url|count|rating, all=false, regex?}}`. `selector`를 생략하면 레코드 요소 자체를 읽습니다. `regex`의 첫 캡처 그룹(없으면 전체 일치)을 값으로 씁니다.
+- 텍스트 조립 규칙: 블록 요소 경계는 공백, 인라인 경계는 앞 조각이 통화 기호·`.`·`,`로 끝나거나 뒤 조각이 `.`·`,`로 시작할 때만 붙입니다. 그래서 `<span>₩12,345</span><span>1,000+ 판매</span>`는 "₩12,345 1,000+ 판매", `<span>US $</span><span>12</span><span>.</span><span>34</span>`는 "US $12.34"입니다. 통화 표기는 ISO 코드(KRW/USD/EUR/GBP/JPY/CNY/CAD/AUD)로 통일합니다.
+- `quality`: `{confidence: high|medium|low|none, coverage: {필드: 값이 있는 레코드 비율}, records, hint?}`. 자동 감지에서는 title/url/price 커버리지 평균이 0.8 이상이면 `high`입니다. `low`/`none`이면 `hint`가 `container`/`item`/`fields` 지정을 안내합니다.
 - 레코드: `{index, id, fields, missing?}`. `missing`은 필드별 누락 원인(`no_match`, `attribute_empty`, `empty_text`, `regex_no_match`)입니다. 누락 필드 값은 `null`입니다.
 - `dedupe`: `true`(url, 없으면 title+price) 또는 필드 배열. `text`/`match`로 레코드 텍스트 조건을 걸 수 있습니다.
-- 응답: `records`, `total`, `matched`, `duplicates_removed`, `detection`, `offset`, `next_offset`, `omitted`, `missing_fields`, `frame`, `budget`.
+- 응답: `records`, `total`, `matched`, `duplicates_removed`, `detection`, `quality`, `offset`, `next_offset`, `omitted`, `missing_fields`, `frame`, `budget`.
+
+### 상품 상세 요약(`page.product`)
+
+상세 페이지 하나를 사이트별 선택자 없이 구조화합니다. 신뢰도 순으로 JSON-LD(schema.org Product/Offer/AggregateRating) → 마이크로데이터(`itemprop`) → Open Graph/`product:price:*` 메타 → DOM 휴리스틱(h1, 글자가 가장 큰 가격 요소, 취소선 원가, 본문의 판매량/평점/리뷰/배송/재고 문구, 판매자, 옵션 select와 sku/option 그룹, 큰 이미지)을 합칩니다.
+
+```json
+{"detected":true,"confidence":"high","url":"https://…","structured_data":{"json_ld":true,"microdata":false,"open_graph":true},
+ "product":{"title":"무선 이어폰 A","price":{"raw":"12345 KRW","value":12345,"currency":"KRW"},"original_price":{"raw":"15,000원","value":15000,"currency":"KRW"},
+            "discount":18,"sold":{"raw":"1,000+","value":1000,"plus":true},"rating":4.5,"reviews":{"raw":"1234","value":1234,"plus":false},
+            "shipping":"무료배송","availability":"in_stock","brand":"아리","seller":"아리스토어","sku":"A-1",
+            "options":[{"label":"색상","id":"t1e40","choices":2,"selected":"검정"}],"images":["https://…/one.png"],"description":"…","title_id":"t1e12","price_id":"t1e15"},
+ "sources":{"title":"json-ld","price":"json-ld","original_price":"dom","discount":"text","sold":"text","rating":"json-ld","reviews":"json-ld","shipping":"text"}}
+```
+
+`detected`는 제목과 가격을 모두 찾았는지, `confidence`는 가격 출처가 구조화 데이터/메타면 `high`, DOM 휴리스틱이면 `medium`입니다. 원가는 취소선 요소에서만 읽어 다른 판매처 가격을 원가로 오인하지 않습니다. `og:title`이 사이트 이름과 같거나 `og:type=website`면 h1을 제목으로 우선합니다. 찾지 못하면 `detected=false`와 `hint`를 돌려줍니다.
 
 ### 페이지 상태(`page.state`)
 
@@ -221,7 +299,7 @@ CSS 선택자로 요소를 Chromium 안에서 고르고 요청한 필드만 돌�
 
 ## 진단과 정리
 
-`doctor`(또는 CLI `--doctor`)는 `aribrowser`, `platform`, `user{name,uid,is_root}`, `display{DISPLAY,WAYLAND_DISPLAY,XAUTHORITY,xauthority_exists}`, `chromium{chromium,headless_shell,launch_path,browsers_root,version}`, `apparmor`, `userns`, `suid_sandbox`, `launch_env`, `sandbox{ok,sandbox_active,code,message,fix,seccomp}`, `profiles`(잠금 상태), `processes`, `checks[{id,status=ok|warn|fail,code,message}]`, `summary{ok,error_code,fix,warnings}`를 돌려줍니다. 프로토콜 `doctor`는 `session{open_profiles,tabs,own_processes,foreign_processes}`를 추가합니다. 진단 코드와 조치는 [SANDBOX.md](SANDBOX.md)에 있습니다.
+`doctor`(또는 CLI `--doctor`)는 `aribrowser`, `platform`, `user{name,uid,is_root}`, `display{DISPLAY,WAYLAND_DISPLAY,XAUTHORITY,xauthority_exists}`, `chromium{chromium,headless_shell,launch_path,browsers_root,bundled,version}`, `browser_policy`, `system_browsers[{kind,path,resolved,snap}]`, `apparmor{…,profile_roots,profile_covers_current}`, `userns`, `sandbox_helper{installed,path,owner_uid,mode}`, `suid_sandbox`, `launch_env`, `sandbox{ok,sandbox_active,sandbox_source,code,message,fix,seccomp,fallback?}`, `profiles`(잠금 상태), `processes`, `checks[{id,status=ok|warn|info|fail,code,message}]`, `summary{ok,error_code,fix,warnings,system_browser_fallback}`를 돌려줍니다. `--browser auto`에서 번들 실행이 샌드박스 문제로 실패하면 시스템 브라우저로 같은 검사를 반복해 `sandbox.fallback`에 담고 `sandbox_launch`를 경고로 낮춥니다. 프로토콜 `doctor`는 `session{open_profiles,tabs,own_processes,foreign_processes}`를 추가합니다. 진단 코드와 조치는 [SANDBOX.md](SANDBOX.md)에 있습니다.
 
 `close` 응답:
 
@@ -232,6 +310,6 @@ CSS 선택자로 요소를 Chromium 안에서 고르고 요청한 필드만 돌�
 
 ## 이벤트와 오류
 
-이벤트는 seq/time/type과 tab/profile 등의 문맥을 갖습니다. `loading_started`, `dom_ready`, `loading_finished`, `navigation`, `frame_navigation`, `redirect`, `tab_created`, `tab_closed`, `popup_created`, `dialog_opened`, `dialog_closed`, `download_started`, `download_completed`, `download_failed`, `network_failed`, `not_found`, `authentication_required`, `server_error`, `http_error`, `script_error`, `browser_crashed`, `profile_closed`, `profile_lock_recovered`, `background_error`를 제공합니다. 버퍼 초과는 `events_omitted=true`로 표시합니다.
+이벤트는 seq/time/type과 tab/profile 등의 문맥을 갖습니다. `loading_started`, `dom_ready`, `loading_finished`, `navigation`, `frame_navigation`, `redirect`, `navigation_retry`, `tab_created`, `tab_closed`, `popup_created`, `dialog_opened`, `dialog_closed`, `download_started`, `download_completed`, `download_failed`, `network_failed`, `not_found`, `authentication_required`, `server_error`, `http_error`, `script_error`, `browser_crashed`, `browser_fallback`, `browser_selected`, `profile_closed`, `profile_lock_recovered`, `background_error`를 제공합니다. 버퍼 초과는 `events_omitted=true`로 표시합니다.
 
-주요 오류 코드는 `INVALID_JSON`, `INVALID_REQUEST`, `INVALID_ARGUMENT`, `UNKNOWN_COMMAND`, `TAB_NOT_FOUND`, `PROFILE_NOT_FOUND`, `PROFILE_EXISTS`, `PROFILE_LOCKED`, `ELEMENT_NOT_FOUND`, `STALE_ELEMENT`, `ELEMENT_NOT_ACTIONABLE`, `ACTION_FAILED`, `EXPECTATION_NOT_MET`, `NETWORK_FAILED`, `BROWSER_UNAVAILABLE`, `BROWSER_CRASHED`, `BROWSER_ERROR`, `BROWSER_LAUNCH_FAILED`, `PAGE_UNRESPONSIVE`, `WAIT_TIMEOUT`, `FILE_NOT_FOUND`, `RESOURCE_NOT_FOUND`, `RESOURCE_FAILED`, `IO_ERROR`, `SESSION_CLOSED`와 실행 환경 코드 `CHROMIUM_MISSING`, `CHROMIUM_DEPENDENCIES_MISSING`, `SANDBOX_ROOT_USER`, `SANDBOX_USERNS_RESTRICTED`, `SANDBOX_PROFILE_STALE`, `SANDBOX_PROFILE_NOT_LOADED`, `SANDBOX_LAUNCH_FAILED`, `DISPLAY_MISSING`입니다. HTTP 404/500은 렌더 가능한 문서이므로 탐색은 성공 응답이며 `page.http_status`, 요약의 `errors.http_status`와 이벤트에 오류를 표시합니다.
+주요 오류 코드는 `INVALID_JSON`, `INVALID_REQUEST`, `INVALID_ARGUMENT`, `UNKNOWN_COMMAND`, `TAB_NOT_FOUND`, `PROFILE_NOT_FOUND`, `PROFILE_EXISTS`, `PROFILE_LOCKED`, `ELEMENT_NOT_FOUND`, `STALE_ELEMENT`, `ELEMENT_NOT_ACTIONABLE`, `ACTION_FAILED`, `EXPECTATION_NOT_MET`, `NETWORK_FAILED`, `BROWSER_UNAVAILABLE`, `BROWSER_CRASHED`, `BROWSER_ERROR`, `BROWSER_LAUNCH_FAILED`, `PAGE_UNRESPONSIVE`, `WAIT_TIMEOUT`, `PAGE_EMPTY`, `PAGE_BLOCKED`, `FILE_NOT_FOUND`, `RESOURCE_NOT_FOUND`, `RESOURCE_FAILED`, `IO_ERROR`, `SESSION_CLOSED`와 실행 환경 코드 `CHROMIUM_MISSING`, `CHROMIUM_DEPENDENCIES_MISSING`, `SANDBOX_ROOT_USER`, `SANDBOX_USERNS_RESTRICTED`, `SANDBOX_HELPER_INVALID`, `SANDBOX_PROFILE_STALE`, `SANDBOX_PROFILE_NOT_LOADED`, `SANDBOX_LAUNCH_FAILED`, `SYSTEM_BROWSER_MISSING`, `DISPLAY_MISSING`입니다. HTTP 404/500은 렌더 가능한 문서이므로 탐색은 성공 응답이며 `page.http_status`, 요약의 `errors.http_status`와 이벤트에 오류를 표시합니다.

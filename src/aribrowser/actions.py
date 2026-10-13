@@ -8,6 +8,11 @@ v0.1.0의 조작 응답은 세 단계를 구분한다.
 - `expected_state_reached`: Agent가 `expect`로 지정한 기대 상태(URL/텍스트/선택자/
   값/네트워크 안정 등)에 도달했다. 도달하지 못하면 `EXPECTATION_NOT_MET` 오류로
   원인을 돌려주어 미완료 작업을 성공으로 오인하지 않게 한다.
+
+v0.2.0의 `navigate`는 네 번째 단계 `content_ready`를 추가한다. `load` 뒤에 readiness.py가
+본문 텍스트·스켈레톤·보안 문자·로그인 폼 신호로 페이지가 실제 내용을 담았는지 판정하고,
+빈 껍데기(`empty`)는 한 번 새로 고쳐 재시도한 뒤에도 비어 있으면 `PAGE_EMPTY`, 차단은
+`PAGE_BLOCKED` 오류로 돌려준다. `include`로 레코드/상품/상태를 같은 응답에 실어 왕복을 줄인다.
 """
 
 import asyncio
@@ -19,6 +24,7 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from .errors import BrowserError
+from .readiness import HINTS, assess, parse_ready
 from .waiting import baseline_of, parse_conditions, parse_timeout, wait_for
 
 ELEMENT_ACTIONS = {"click", "open_link", "double_click", "hover", "fill", "type", "clear", "check",
@@ -73,7 +79,9 @@ async def settle(page, milliseconds: int = 150) -> None:
 
 # navigate/action 응답을 만들 때 snapshot으로 그대로 넘기는 출력 옵션.
 VIEW_OPTIONS = {"format", "fields", "compact", "max_bytes", "max_elements", "max_tokens", "limit", "offset",
-                "include_hidden", "region", "max_regions", "max_headings"}
+                "include_hidden", "region", "max_regions", "max_headings", "include_events"}
+# navigate.include로 같은 응답에 실을 수 있는 추가 조회.
+INCLUDES = {"records", "product", "state", "events"}
 
 
 def view_options(options: dict) -> dict:
@@ -113,34 +121,101 @@ async def verify_expectation(browser, tab, expect: dict | None, timeout_ms: int,
                            reason="; ".join(f"{u['condition']}: expected {u['expected']!r}, actual {u['actual']!r}" for u in outcome["unmet"]))
 
 
+def parse_include(options: dict) -> list[str]:
+    """include 매개변수(추가 조회 목록)를 검증한다."""
+    include = options.get("include", [])
+    if not isinstance(include, list) or any(not isinstance(i, str) for i in include) or set(include) - INCLUDES:
+        raise BrowserError("INVALID_ARGUMENT", "include는 records/product/state/events 배열입니다.", allowed=sorted(INCLUDES))
+    extract = options.get("extract", {})
+    if not isinstance(extract, dict):
+        raise BrowserError("INVALID_ARGUMENT", "extract는 extract 명령의 매개변수 객체입니다.")
+    return include
+
+
+async def goto(browser, tab, url: str, settle_ms: int, load_timeout_ms: int = 10000) -> dict:
+    """실제 탐색을 수행하고 HTTP 상태를 돌려준다. load는 load_timeout_ms까지만 기다린다.
+
+    광고/추적 스크립트가 많은 페이지는 `load`가 10초 넘게 지연되지만 본문은 이미 완성돼 있다.
+    로딩 품질 검증(readiness)이 켜져 있으면 load는 짧게(2초)만 기다리고 내용 판정에 맡긴다.
+    """
+    try:
+        response = await tab.page.goto(url, wait_until="domcontentloaded")
+        try:
+            await tab.page.wait_for_load_state("load", timeout=min(browser.config.timeout_ms, load_timeout_ms))
+        except PlaywrightTimeout:
+            pass
+        await settle(tab.page, settle_ms)
+    except PlaywrightTimeout as error:
+        raise BrowserError("PAGE_UNRESPONSIVE", "탐색 제한 시간이 지났습니다.", url=url) from error
+    except PlaywrightError as error:
+        raise BrowserError("NETWORK_FAILED", str(error), url=url) from error
+    return {"http_status": response.status if response else tab.status}
+
+
 async def navigate(browser, url: str, tab_id: str | None = None, **options) -> dict:
-    """실제 Chromium 탐색 후 기본으로 페이지 요약을 반환한다. mode로 변경분/전체 화면을 고를 수 있다."""
+    """실제 Chromium 탐색 후 로딩 품질을 검증하고 기본으로 페이지 요약을 반환한다.
+
+    흐름: goto → load(≤10초) → readiness 판정(제한 시간 내 반복) → 비어 있으면 reload 재시도 →
+    `empty`/`blocked`는 오류(ready.on_fail=warn이면 경고) → expect 검증 → 요약/화면 + include 조회.
+    """
     url = validate_url(url)
     if not browser.tabs:
         await browser.create_profile()
     tab = browser.get_tab(tab_id)
     expect, timeout_ms = parse_expect(options, browser.config.timeout_ms)
+    ready = parse_ready(options, browser.config.timeout_ms)
+    include = parse_include(options)
+    settle_ms = options.get("settle_ms", 150)
     if tab.previous is None:
         tab.previous = await browser.observe(tab)
     baseline = baseline_of(browser, tab)
-    try:
-        response = await tab.page.goto(url, wait_until="domcontentloaded")
-        # 대형 페이지는 DOMContentLoaded 직후 스크립트가 DOM을 크게 바꾸므로 load를 짧게 기다린다.
-        # 느린 자원 때문에 영원히 기다리지는 않는다(최대 timeout_ms, 10초 상한).
+    load_timeout = 2000 if ready is not None else 10000
+    outcome = await goto(browser, tab, url, settle_ms, load_timeout)
+    readiness = None
+    attempts = 1
+    if ready is not None:
+        readiness = await assess(browser, tab, ready, outcome["http_status"])
+        # 빈 껍데기는 새로 고침으로 한 번 더 시도한다. 차단/로그인/HTTP 오류는 재시도해도 같다.
+        while readiness["status"] in {"empty", "loading"} and attempts <= ready["retry"]:
+            attempts += 1
+            browser.emit("navigation_retry", tab=tab.id, url=url, attempt=attempts, reason=readiness["status"])
+            outcome = await goto(browser, tab, url, settle_ms, load_timeout)
+            readiness = await assess(browser, tab, ready, outcome["http_status"])
+        readiness["attempts"] = attempts
+        if readiness["status"] in HINTS:
+            readiness["hint"] = HINTS[readiness["status"]]
+    content_ready = None if readiness is None else readiness["status"] == "ready"
+    verification = {"action_dispatched": True, "navigation": True, "http_status": outcome["http_status"],
+                    "content_ready": content_ready, "readiness": readiness["status"] if readiness else None}
+    if readiness and readiness["status"] in {"empty", "blocked", "error"} and ready["on_fail"] == "error":
+        code = {"empty": "PAGE_EMPTY", "blocked": "PAGE_BLOCKED", "error": "NETWORK_FAILED"}[readiness["status"]]
         try:
-            await tab.page.wait_for_load_state("load", timeout=min(browser.config.timeout_ms, 10000))
-        except PlaywrightTimeout:
-            pass
-        await settle(tab.page, options.get("settle_ms", 150))
-    except PlaywrightTimeout as error:
-        raise BrowserError("PAGE_UNRESPONSIVE", "탐색 제한 시간이 지났습니다.", url=url) from error
-    except PlaywrightError as error:
-        raise BrowserError("NETWORK_FAILED", str(error), url=url) from error
-    verification = {"action_dispatched": True, "navigation": True,
-                    "http_status": response.status if response else tab.status}
+            title = await asyncio.wait_for(tab.page.title(), 2)
+        except Exception:
+            title = ""
+        raise BrowserError(code, {"empty": "페이지가 로드됐지만 실제 내용이 없습니다(빈 껍데기).",
+                                  "blocked": "사이트가 자동화 접근을 차단했습니다.",
+                                  "error": "Chromium 오류 페이지가 표시됐습니다."}[readiness["status"]],
+                           url=url, page={"url": tab.page.url, "title": title, "http_status": outcome["http_status"]},
+                           readiness=readiness, verification=verification, hint=readiness.get("hint"),
+                           recovery="응답은 오류지만 탭에는 현재 문서가 남아 있습니다. snapshot/query로 내용을 확인할 수 있습니다.")
     await verify_expectation(browser, tab, expect, timeout_ms, baseline, verification)
-    result = await browser.snapshot(tab.id, mode=options.get("mode", "summary"), **view_options(options))
+    view = view_options(options)
+    if options.get("mode", "summary") == "summary" and readiness:
+        view["kind"] = readiness.get("kind")
+    result = await browser.snapshot(tab.id, mode=options.get("mode", "summary"), **view)
     result["verification"] = verification
+    if readiness:
+        result["readiness"] = readiness
+    # include: 같은 응답에 레코드/상품/상태를 실어 왕복을 줄인다. 각 조회는 자체 예산을 가진다.
+    if "records" in include:
+        result["records"] = await browser.extract(tab.id, **options.get("extract", {}))
+    if "product" in include:
+        result["product"] = await browser.product(tab.id)
+    if "state" in include:
+        result["state"] = await browser.page_state(tab.id)
+    if "events" in include and "events" not in result:
+        result["events"] = browser.event_view(baseline["sequence"])["events"]
     return result
 
 

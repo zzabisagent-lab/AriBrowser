@@ -6,6 +6,11 @@ v0.1.0에서 이 모듈은 다음을 추가로 맡는다.
 - `find`의 정확/정규식/AND-OR 검색, 정렬, 중복 제거, 부모/자식 문맥을 제공한다.
 - 브라우저 안에서 실행되는 CSS 선택자 질의(`query`)와 반복 레코드 추출(`extract`),
   정렬·필터·페이지 상태 감지(`page.state`)를 제공한다.
+
+v0.2.0 추가:
+- 상품 상세 페이지 요약(`page.product`, product.js)과 로딩 품질 신호(readiness.js) 실행.
+- 관측 응답의 이벤트 원문을 종류별 집계(`activity`)로 바꾸고 `include_events=true`일 때만 원문을 싣는다.
+- `extract`의 자동 필드 확장(sold/rating/reviews/original_price/discount)과 품질 지표(`quality`).
 """
 
 import asyncio
@@ -35,24 +40,28 @@ from .summary import page_summary
 
 _HERE = Path(__file__).parent
 REGISTRY = _HERE.joinpath("registry.js").read_text(encoding="utf-8").strip()
+TEXTLIB = _HERE.joinpath("textlib.js").read_text(encoding="utf-8").strip()
 
 
 def _script(name: str) -> str:
-    """스크립트 파일을 읽고 공용 레지스트리 코드를 삽입한다."""
-    return _HERE.joinpath(name).read_text(encoding="utf-8").replace("/*REGISTRY*/", REGISTRY)
+    """스크립트 파일을 읽고 공용 레지스트리/텍스트 라이브러리 코드를 자리 표시 위치에 삽입한다."""
+    return _HERE.joinpath(name).read_text(encoding="utf-8").replace("/*REGISTRY*/", REGISTRY).replace("/*TEXTLIB*/", TEXTLIB)
 
 
 COLLECTOR = _script("collector.js")
 QUERY = _script("query.js")
 PAGESTATE = _script("pagestate.js")
+PRODUCT = _script("product.js")
+READINESS = _script("readiness.js")
 DOM_QUIET = "() => { const a = window.__aribrowser_activity__; return a ? Math.round(performance.now() - a.lastMutation) : null; }"
 
 MATCH_MODES = {"contains", "exact", "regex", "prefix"}
 SEARCH_FIELDS = {"name", "text", "value", "href", "description"}
 SORT_KEYS = {"document", "name", "role", "position"}
-QUERY_FIELDS = {"id", "tag", "text", "name", "role", "href", "src", "value", "visible", "classes", "bounds", "price", "number", "attributes"}
+QUERY_FIELDS = {"id", "tag", "text", "name", "role", "href", "src", "value", "visible", "classes", "bounds", "price", "number",
+                "attributes", "sold", "rating", "reviews", "discount"}
 ATTRIBUTE_NAME = re.compile(r"^[A-Za-z_:][-A-Za-z0-9_:.]{0,99}$")
-RECORD_TYPES = {"text", "number", "price", "url"}
+RECORD_TYPES = {"text", "number", "price", "url", "count", "rating"}
 
 
 def _validate_selector(value, name: str = "selector") -> str:
@@ -99,11 +108,12 @@ class Browser(Engine):
         return value
 
     # ------------------------------------------------------------------ 관측
-    async def observe(self, tab: Tab) -> dict:
+    async def observe(self, tab: Tab, accessibility: bool = True) -> dict:
         """각 프레임을 독립적으로 읽어 교차 출처 iframe과 open Shadow DOM을 합친다.
 
         반환하는 요소의 id/parent/groups는 모두 짧은 ID이며 internal_id에 긴 ID를 둔다.
         page.stability는 SPA 로딩 완료 판단에 쓰는 네트워크/DOM 안정화 지표다.
+        accessibility=False면 Chromium AX 보강(대형 페이지에서 수 초)을 생략한다. 요약 모드가 쓴다.
         """
         elements, frames, warnings = [], [], []
         tab.elements = {}
@@ -157,7 +167,8 @@ class Browser(Engine):
                     box = item["bounds"]
                     item["state"]["visible"] &= frame_visible
                     item["state"]["in_viewport"] &= frame_visible and box["x"] < viewport["width"] and box["y"] < viewport["height"] and box["x"] + box["width"] > 0 and box["y"] + box["height"] > 0
-                await self._accessibility(tab, frame, data["elements"], warnings)
+                if accessibility:
+                    await self._accessibility(tab, frame, data["elements"], warnings)
                 # AX 보강은 내부 ID 기준으로 끝났으므로 이제 짧은 ID로 바꾼다.
                 for item in data["elements"]:
                     item["internal_id"] = item["id"]
@@ -246,29 +257,62 @@ class Browser(Engine):
     async def snapshot(self, tab_id: str | None = None, **options) -> dict:
         """전체 상태를 기준선으로 저장하되 응답은 요청한 요약/전체/부분/변경분만 제공한다."""
         tab = self.get_tab(tab_id)
-        state = await self.observe(tab)
+        mode = options.get("mode", "full")
+        # 요약은 랜드마크/제목/역할 수만 필요하므로 AX 보강을 생략해 대형 페이지에서 수 초를 아낀다.
+        state = await self.observe(tab, accessibility=mode != "summary")
         diff = compare(tab.previous, state)
         event_data = self.event_view(tab.event_cursor)
+        # v0.2.0: 이벤트 원문 대신 집계를 싣는다. 원문은 include_events=true 또는 events(since=activity.since)로 본다.
+        include_events = options.get("include_events", False)
+        if not isinstance(include_events, bool):
+            raise BrowserError("INVALID_ARGUMENT", "include_events는 true/false입니다.")
+        activity = {"activity": self.activity_view(tab.event_cursor, tab.id), "cursor": event_data["cursor"]}
+        if include_events:
+            activity["events"] = event_data["events"]
+            activity["events_omitted"] = event_data["events_omitted"]
         # 옵션 검증 실패가 기존 기준선을 소비하지 않도록 뷰를 먼저 생성한다.
-        mode = options.get("mode", "full")
         limits = parse_limits(options, self.config.max_bytes)
+        kind = options.get("kind")  # navigate가 readiness에서 추정한 페이지 종류. 직접 호출이면 여기서 추정한다.
+        if mode == "summary" and kind is None:
+            try:
+                from .readiness import page_kind
+
+                kind = page_kind(await self.readiness_signals(tab))
+            except BrowserError:
+                kind = None
         if mode == "changes":
             changes, limited = shape_changes(diff, limits, parse_compact(options), tab.main_frame_id)
-            result = {"changes": changes, **event_data, "page": state["page"], "warnings": state["warnings"]}
+            result = {"changes": changes, **activity, "page": state["page"], "warnings": state["warnings"]}
             result["budget"] = budget_report(result, limits, len(changes["added"]), limited["truncated"],
                                              limited["truncated_by"], limited["next_offset"], limited["oversized"])
         elif mode == "summary":
-            result = {**page_summary(state, event_data["events"], options), **event_data}
+            result = {**page_summary(state, event_data["events"], options, kind), **activity}
             result["budget"] = budget_report(result, limits, 0, False)
         else:
             view = select_view(state, options, limits, tab.main_frame_id)
             limited = view.pop("_limited")
-            result = {**view, **event_data}
+            result = {**view, **activity}
             result["budget"] = budget_report(result, limits, len(limited["items"]), limited["truncated"],
                                              limited["truncated_by"], limited["next_offset"], limited["oversized"])
         tab.previous = copy.deepcopy(state)
         tab.event_cursor = event_data["cursor"]
         return result
+
+    async def stability(self, tab: Tab) -> dict:
+        """네트워크/DOM 안정화 지표를 관측 없이 읽는다(readiness 대기 루프용)."""
+        try:
+            dom_quiet = await asyncio.wait_for(tab.page.main_frame.evaluate(DOM_QUIET), 2)
+        except (PlaywrightError, asyncio.TimeoutError):
+            dom_quiet = None
+        return {"network_inflight": len(tab.inflight), "network_quiet_ms": int((time.monotonic() - tab.last_network) * 1000),
+                "dom_quiet_ms": dom_quiet}
+
+    async def readiness_signals(self, tab: Tab) -> dict:
+        """readiness.js를 주 프레임에서 실행해 로딩 품질 신호를 읽는다."""
+        try:
+            return await asyncio.wait_for(tab.page.main_frame.evaluate(READINESS, {"textLimit": 60000}), self.config.timeout_ms / 1000)
+        except (PlaywrightError, asyncio.TimeoutError) as error:
+            raise BrowserError("PAGE_UNRESPONSIVE", "로딩 상태 신호를 읽지 못했습니다.", reason=str(error)) from error
 
     async def element_handle(self, tab: Tab, element_id: str):
         """선택 당시의 실제 DOM 노드만 반환하며 이름이 같은 새 요소로 재탐색하지 않는다.
@@ -585,7 +629,7 @@ class Browser(Engine):
                 if "attr" in spec and (not isinstance(spec["attr"], str) or not ATTRIBUTE_NAME.match(spec["attr"])):
                     raise BrowserError("INVALID_ARGUMENT", f"fields.{name}.attr은 HTML 속성 이름입니다.")
                 if "type" in spec and spec["type"] not in RECORD_TYPES:
-                    raise BrowserError("INVALID_ARGUMENT", f"fields.{name}.type은 text/number/price/url입니다.")
+                    raise BrowserError("INVALID_ARGUMENT", f"fields.{name}.type은 text/number/price/url/count/rating입니다.")
                 if "all" in spec and not isinstance(spec["all"], bool):
                     raise BrowserError("INVALID_ARGUMENT", f"fields.{name}.all은 true/false입니다.")
                 if "regex" in spec and (not isinstance(spec["regex"], str) or len(spec["regex"]) > 500):
@@ -607,9 +651,14 @@ class Browser(Engine):
         limits = parse_limits(options, self.config.max_bytes)
         limited = limit_items(data["records"], limits, offset=offset)
         selected = limited["items"]
+        quality = data.get("quality") or {"confidence": "none", "coverage": {}, "records": 0}
+        if quality["confidence"] in {"low", "none"}:
+            quality["hint"] = ("레코드를 찾지 못했습니다. container/item 선택자를 지정하거나 snapshot(mode=main)으로 구조를 확인하세요."
+                               if quality["confidence"] == "none" else
+                               "자동 감지 결과의 필드 커버리지가 낮습니다. detection.candidates의 다른 컨테이너를 container로 지정하거나 item/fields 선택자를 지정하세요.")
         result = {"records": selected, "total": data["total"], "matched": data["matched"],
-                  "duplicates_removed": data["duplicates_removed"], "detection": data["detection"], "offset": offset,
-                  "next_offset": limited["next_offset"] if limited["truncated"] else data["next_offset"],
+                  "duplicates_removed": data["duplicates_removed"], "detection": data["detection"], "quality": quality,
+                  "offset": offset, "next_offset": limited["next_offset"] if limited["truncated"] else data["next_offset"],
                   "omitted": max(0, data["matched"] - offset - len(selected)), "frame": params["prefix"],
                   "missing_fields": sum(1 for r in selected if r.get("missing"))}
         result["budget"] = budget_report(result, limits, len(selected), limited["truncated"], limited["truncated_by"],
@@ -645,4 +694,23 @@ class Browser(Engine):
             "total_results_detected": data.get("total_results") is not None,
             "has_next": pagination.get("has_next"),
         }
+        return data
+
+    async def product(self, tab_id: str | None = None) -> dict:
+        """상품 상세 페이지를 구조화 데이터(JSON-LD/마이크로데이터/메타)와 DOM 휴리스틱으로 요약한다.
+
+        `detected`는 제목과 가격을 모두 찾았는지, `confidence`는 가격의 출처가 구조화 데이터인지
+        (high) DOM 휴리스틱인지(medium) 나타낸다. `sources`에 필드별 출처를 돌려준다.
+        """
+        tab = self.get_tab(tab_id)
+        frame = tab.page.main_frame
+        try:
+            data = await asyncio.wait_for(frame.evaluate(PRODUCT, {"prefix": self.frame_prefix(tab, frame)}),
+                                          self.config.timeout_ms / 1000)
+        except asyncio.TimeoutError as error:
+            raise BrowserError("PAGE_UNRESPONSIVE", "상품 정보 추출이 제한 시간을 넘겼습니다.") from error
+        data = self.translate_ids(tab, frame, data)
+        if not data["detected"]:
+            data["hint"] = ("제목이나 가격을 찾지 못했습니다. 상세 페이지가 아니거나 데이터가 늦게 채워지는 페이지입니다. "
+                            "navigate 응답의 readiness를 확인하고 query(selector)로 가격 요소를 직접 읽으세요.")
         return data
