@@ -18,7 +18,9 @@ aribrowser --doctor               # sandbox.sandbox_source = setuid_helper
 sudo apt remove aribrowser        # AriBrowser가 설치한 도우미/정책만 제거
 ```
 
-패키지는 `/opt/aribrowser`에 번들을 두고 `/usr/bin/aribrowser` 링크를 만듭니다. `postinst`가 공용 setuid 도우미(아래 표의 기본 방법)를 설치하므로 압축 해제 뒤 따로 `--install-sandbox`를 실행할 필요가 없고, 전역 AppArmor/sysctl 설정은 바꾸지 않습니다. 업그레이드 시에는 도우미를 유지하며(`prerm`은 remove/purge에서만 제거) 설치 경로가 바뀌어도 도우미가 경로·리비전과 무관하므로 설정이 유지됩니다. tarball 배포는 아래처럼 한 번 설치합니다.
+패키지는 `/opt/aribrowser`에 번들을 두고 `/usr/bin/aribrowser` 링크를 만들며, setuid root `chrome-sandbox`(Chromium이 제공하는 도우미)를 Chromium 디렉터리와 headless shell 디렉터리 안에 함께 담습니다(Google Chrome .deb가 `/opt/google/chrome/chrome-sandbox`를 두는 것과 같은 방식). 따로 `--install-sandbox`를 실행할 필요가 없고 전역 AppArmor/sysctl 설정과 `/usr/local`, `/etc`는 건드리지 않습니다. 설치·업그레이드·제거는 모두 dpkg가 처리하므로 제거하면 패키지 파일만 사라지고, 설치 경로는 `/opt/aribrowser`로 고정되어 업그레이드 뒤에도 샌드박스가 유지됩니다. tarball 배포는 아래처럼 한 번 설치합니다.
+
+> **Chromium의 규칙**: Chromium은 실행 파일이 **실행 사용자 소유**일 때만 환경 변수 `CHROME_DEVEL_SANDBOX`(공용 도우미)를 읽습니다(`setuid_sandbox_host.cc`). root 소유 설치(apt 패키지, root가 `/opt`에 푼 tarball)에서는 실행 파일 옆의 `chrome-sandbox`만 씁니다. 그래서 `.deb`는 도우미를 안에 담고, `sudo ./aribrowser --install-sandbox`는 실행 파일이 호출 사용자 소유가 아니면 공용 도우미와 함께 실행 파일 옆(Chromium·headless shell 디렉터리)에도 도우미를 설치합니다. `--doctor`의 `executable_owned_by_user`와 `in_dir_helpers`로 확인할 수 있습니다.
 
 ## 0.2.0: 호스트당 한 번만 설치
 
@@ -26,7 +28,7 @@ sudo apt remove aribrowser        # AriBrowser가 설치한 도우미/정책만 
 
 | 방법 | 명령 | 동작 | 적용 범위 |
 | --- | --- | --- | --- |
-| 공용 setuid 도우미(기본) | `sudo ./aribrowser --install-sandbox` | Chromium이 제공하는 `chrome_sandbox`를 `/usr/local/lib/aribrowser/chrome-sandbox`(root:root, 4755)에 복사. 실행 시 `CHROME_DEVEL_SANDBOX`로 전달 | 모든 경로·리비전·사용자. AppArmor 유무와 userns 제한 무관 |
+| 공용 setuid 도우미(기본) | `sudo ./aribrowser --install-sandbox` | Chromium이 제공하는 `chrome_sandbox`를 `/usr/local/lib/aribrowser/chrome-sandbox`(root:root, 4755)에 복사. 실행 시 `CHROME_DEVEL_SANDBOX`로 전달. 실행 파일이 호출 사용자 소유가 아니면 실행 파일 옆에도 설치 | 사용자 소유 설치의 모든 경로·리비전·사용자. AppArmor 유무와 userns 제한 무관 |
 | 경로 독립 AppArmor 정책 | `sudo ./aribrowser --install-sandbox --sandbox-method apparmor` | `/etc/apparmor.d/aribrowser-chromium`에 `userns` 허용 정책 설치. 모든 사용자의 Playwright 캐시와 배포 디렉터리 구조에 붙음 | `/home/*/.cache/ms-playwright`, `/root/.cache/ms-playwright`, `/**/_internal/playwright/driver/package/.local-browsers` 아래의 `chrome`/`chrome-headless-shell` |
 | 시스템 브라우저 대체 | 설치 없음(`--browser auto`, 기본) | 번들 Chromium이 샌드박스 문제로 실행되지 않으면 설치된 Google Chrome/Chromium/Edge/Brave로 실행 | 배포판이 이미 허용한 브라우저. Snap Chromium은 홈 숨김 디렉터리 접근 제한으로 후순위 |
 
@@ -52,9 +54,9 @@ profile aribrowser-chromium /{home/*/.cache/ms-playwright,root/.cache/ms-playwri
 
 표준 패턴 밖의 경로에 Chromium을 두었다면(`--chromium <경로>`) 설치 시 그 브라우저 루트가 패턴에 추가됩니다. root가 아니면 정책 본문과 설치 명령을 출력하고 종료 코드 2를 돌려줍니다. AppArmor가 user namespace를 제한하지 않는 커널(Ubuntu 22.04 등)에서는 `status=not_needed`로 끝납니다. `sudo`로 실행하면 HOME이 root로 바뀌므로 소스 실행 시에는 호출 사용자(`SUDO_USER`)의 Playwright 캐시 경로를 다시 해석하고, 설치 뒤 검증은 호출 사용자 권한으로 내려서 `--browser bundled`로 수행합니다(대체 실행이 아니라 번들 Chromium 자체를 검증).
 
-### 0.1.0 방식(`--sandbox-method suid`)
+### 실행 파일 옆 도우미(`--sandbox-method suid`)
 
-Chromium 디렉터리 안에 `chrome-sandbox`를 설치합니다. 설치 디렉터리를 따라다니므로 새 경로마다 다시 설치해야 합니다. 호환을 위해 남겨 두었습니다.
+Chromium 디렉터리와 headless shell 디렉터리 안에 `chrome-sandbox`를 설치합니다(0.1.0 방식, 0.3.0부터 headless shell 디렉터리 포함). 설치 디렉터리를 따라다니므로 새 경로마다 다시 설치해야 하지만, root 소유 설치에서 Chromium이 유일하게 인정하는 방식입니다.
 
 ## 시스템 브라우저 대체(`--browser`)
 

@@ -20,7 +20,7 @@ Chromium → DOM + Chromium 접근성 트리 + 계산된 레이아웃
 | 운영체제 | 배포 파일 | 실행 파일 |
 | --- | --- | --- |
 | Linux x64 (tarball) | `aribrowser-0.3.0-linux-x64.tar.gz` | `./aribrowser` |
-| Linux x64 (Debian/Ubuntu 패키지) | `aribrowser_0.3.0_amd64.deb` | `aribrowser` (`/usr/bin`, 설치 시 샌드박스 도우미 포함) |
+| Linux x64 (Debian/Ubuntu 패키지) | `aribrowser_0.3.0_amd64.deb` | `aribrowser` (`/usr/bin`, setuid 샌드박스 도우미 포함) |
 | Windows x64 | `aribrowser-0.3.0-windows-x64.zip` | `aribrowser.exe` |
 | macOS Apple Silicon | `aribrowser-0.3.0-macos-arm64.tar.gz` | `./aribrowser` |
 | macOS Intel | `aribrowser-0.3.0-macos-x64.tar.gz` | `./aribrowser` |
@@ -28,7 +28,7 @@ Chromium → DOM + Chromium 접근성 트리 + 계산된 레이아웃
 Linux는 Ubuntu 22.04 이상 및 Chromium 시스템 라이브러리가 필요합니다. macOS 15/Windows Server 2022에서 네이티브 빌드·검증합니다. macOS Developer ID 공증과 Windows Authenticode 서명은 포함하지 않습니다. 배포 파일 옆의 `.sha256`으로 무결성을 확인할 수 있습니다.
 
 ```bash
-sudo apt install ./aribrowser_0.3.0_amd64.deb   # Debian/Ubuntu: 설치와 함께 샌드박스 도우미 설치(권장)
+sudo apt install ./aribrowser_0.3.0_amd64.deb   # Debian/Ubuntu: 샌드박스 도우미가 포함된 패키지(권장)
 ./aribrowser --version
 ./aribrowser --doctor                  # 실행 환경 진단 (Chromium/사용자/AppArmor/도우미/시스템 브라우저/샌드박스/프로세스)
 sudo ./aribrowser --install-sandbox    # Ubuntu 24.04+: 공용 샌드박스 도우미를 호스트당 한 번 설치 + 검증

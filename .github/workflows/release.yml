@@ -108,7 +108,7 @@ jobs:
           python -m aribrowser --doctor --browser bundled --chromium "$CHROME" > doctor-after.json
           python -c "import json; d=json.load(open('doctor-after.json')); print(json.dumps(d['summary'], ensure_ascii=False)); assert d['summary']['ok'] and d['sandbox']['sandbox_active'] and d['apparmor']['profile_covers_current'], d['summary']"
           python -m aribrowser --self-test --browser bundled
-      - name: Debian package installs the sandbox helper, passes a sandboxed self-test and removes only its own files
+      - name: Debian package ships setuid sandbox helpers, passes a sandboxed self-test and removes cleanly
         # 각 하위 명령의 출력을 GitHub 주석(::notice/::error)으로 남겨 작업 로그 권한 없이도 실패 원인을 볼 수 있게 한다.
         # 이 작업은 소스를 pip로 설치하므로 PATH의 `aribrowser`는 소스 콘솔 스크립트다. 패키지 바이너리는 /usr/bin/aribrowser로 부른다.
         run: |
@@ -118,19 +118,17 @@ jobs:
           run "helper absent before deb" test ! -e /usr/local/lib/aribrowser/chrome-sandbox
           run "artifacts" ls -la artifacts
           run "apt install deb" sudo apt-get install -y -qq ./artifacts/aribrowser_*_amd64.deb
-          run "helper installed by postinst" test -u /usr/local/lib/aribrowser/chrome-sandbox
+          run "setuid helpers shipped next to chromium and headless shell" sh -c "ls -la /opt/aribrowser/_internal/playwright/driver/package/.local-browsers/chromium-*/chrome-linux*/chrome-sandbox /opt/aribrowser/_internal/playwright/driver/package/.local-browsers/chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-sandbox; for f in /opt/aribrowser/_internal/playwright/driver/package/.local-browsers/chromium*/*/chrome-sandbox; do test -u \"\$f\" || exit 1; done"
+          run "shared helper untouched by package" test ! -e /usr/local/lib/aribrowser/chrome-sandbox
           run "package binary on PATH" sh -c "command -v aribrowser; readlink -f /usr/bin/aribrowser"
           run "version" /usr/bin/aribrowser --version
-          run "environment" sh -c "env | grep -i playwright || true; ls -la /opt/aribrowser/_internal/playwright/driver/package/.local-browsers; readlink -f /usr/bin/aribrowser"
-          run "doctor chromium" sh -c "/usr/bin/aribrowser --doctor --browser bundled --no-launch --data-dir /tmp/deb-test | python -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(d[\"chromium\"], ensure_ascii=False)); print(json.dumps(d.get(\"launch_env\"), ensure_ascii=False))'"
-          run "helper facts" sh -c "ls -la /usr/local/lib/aribrowser; stat -c '%A %a %U:%G' /usr/local/lib/aribrowser/chrome-sandbox; cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns"
-          run "doctor" sh -c "/usr/bin/aribrowser --doctor --browser bundled --data-dir /tmp/deb-test > doctor-deb.json; python -c 'import json; d=json.load(open(\"doctor-deb.json\")); print(json.dumps({\"summary\": d[\"summary\"], \"sandbox\": {k: d[\"sandbox\"].get(k) for k in (\"ok\", \"code\", \"message\", \"sandbox_source\", \"sandbox_active\")}, \"helper\": d[\"sandbox_helper\"], \"launch_env\": d.get(\"launch_env\"), \"userns\": d.get(\"userns\"), \"chromium\": d[\"chromium\"][\"chromium\"]}, ensure_ascii=False)); assert d[\"summary\"][\"ok\"] and d[\"sandbox\"][\"sandbox_active\"] and d[\"sandbox\"][\"sandbox_source\"] == \"setuid_helper\"'"
+          run "doctor" sh -c "/usr/bin/aribrowser --doctor --browser bundled --data-dir /tmp/deb-test > doctor-deb.json; python -c 'import json; d=json.load(open(\"doctor-deb.json\")); print(json.dumps({\"summary\": d[\"summary\"], \"sandbox\": {k: d[\"sandbox\"].get(k) for k in (\"ok\", \"code\", \"message\", \"sandbox_source\", \"sandbox_active\")}, \"owned_by_user\": d.get(\"executable_owned_by_user\"), \"in_dir_helpers\": d.get(\"in_dir_helpers\"), \"launch_env\": d.get(\"launch_env\"), \"chromium\": d[\"chromium\"][\"chromium\"]}, ensure_ascii=False)); assert d[\"summary\"][\"ok\"] and d[\"sandbox\"][\"sandbox_active\"] and d[\"sandbox\"][\"sandbox_source\"] == \"setuid_helper\" and d[\"executable_owned_by_user\"] is False and all(d[\"in_dir_helpers\"].values())'"
           run "self-test" /usr/bin/aribrowser --self-test --browser bundled --data-dir /tmp/deb-test
           run "jsonl session" sh -c "printf '%s\n' '{\"id\":1,\"command\":\"navigate\",\"params\":{\"url\":\"data:text/html,<title>deb</title><main><h1>Ready</h1><p>deb package runtime check</p></main>\",\"mode\":\"minimal\"}}' '{\"id\":2,\"command\":\"close\"}' | /usr/bin/aribrowser --browser bundled --data-dir /tmp/deb-test > deb-session.jsonl"
           run "runtime assert" python -c "import json; lines=[json.loads(l) for l in open('deb-session.jsonl')]; print(json.dumps(lines[0], ensure_ascii=False)[:800]); r=lines[0]['result']; assert r['runtime']['sandbox_active'] and r['runtime']['resolved_executable'].startswith('/opt/aribrowser/'), r['runtime']"
-          run "apt remove" sudo apt-get remove -y aribrowser
-          run "helper removed by prerm" test ! -e /usr/local/lib/aribrowser/chrome-sandbox
-          run "bundle removed" test ! -e /opt/aribrowser/aribrowser
+          run "apt remove" sudo apt-get remove -y -qq aribrowser
+          run "bundle removed" test ! -e /opt/aribrowser
+          run "symlink removed" test ! -e /usr/bin/aribrowser
           echo "::notice::deb verification outputs: $(echo "$log" | cut -c1-6000)"
       - uses: actions/upload-artifact@v4
         if: always()

@@ -286,9 +286,9 @@ def launch_env(executable_path: str | None) -> dict:
     status = suid_status(str(Path(executable_path).parent))
     if status.get("installed"):
         return {"CHROME_DEVEL_SANDBOX": status["path"]}
-    # headless shell 디렉터리에는 도우미가 없으므로 전체 Chromium 디렉터리의 도우미를 공유한다.
+    # headless shell 디렉터리에 도우미가 없으면 전체 Chromium 디렉터리의 도우미를 공유한다(사용자 소유 설치에서만 유효).
     layout = chromium_layout(executable_path)
-    for candidate in Path(layout["browsers_root"]).glob("chromium-*/*/chrome-sandbox"):
+    for candidate in Path(layout["browsers_root"]).glob("chromium*/*/chrome-sandbox"):
         if suid_status(str(candidate.parent)).get("installed"):
             return {"CHROME_DEVEL_SANDBOX": str(candidate)}
     return {}
@@ -539,6 +539,52 @@ def install_apparmor(browsers_root: str | None) -> dict:
             "roots": profile_roots(profile), "apparmor": apparmor_status(browsers_root)}
 
 
+def owned_by_caller(executable: str | None, uid: int | None = None) -> bool | None:
+    """Chromium 실행 파일이 실행 사용자(uid, 기본 현재 사용자) 소유인지. Linux가 아니거나 경로가 없으면 None.
+
+    Chromium은 CHROME_DEVEL_SANDBOX(공용 도우미)를 **실행 파일이 현재 사용자 소유일 때만** 읽는다
+    (setuid_sandbox_host.cc: "In user-managed builds ... an environment variable is required"). root 소유 설치
+    (/opt의 .deb, root가 푼 tarball)는 실행 파일 옆의 `chrome-sandbox`(Google Chrome .deb와 같은 방식)만 쓴다.
+    """
+    if not sys.platform.startswith("linux") or not executable:
+        return None
+    try:
+        return Path(executable).stat().st_uid == (os.getuid() if uid is None else uid)
+    except OSError:
+        return None
+
+
+def helper_directories(executable: str) -> list[str]:
+    """실행 파일 옆 도우미가 필요한 디렉터리: 전체 Chromium 디렉터리와 같은 리비전의 headless shell 디렉터리."""
+    layout = chromium_layout(executable)
+    directories = [layout["directory"]]
+    if layout.get("headless_shell"):
+        directories.append(str(Path(layout["headless_shell"]).parent))
+    return directories
+
+
+def install_in_dir_helpers(executable: str) -> dict:
+    """root 소유 설치용: Chromium 디렉터리와 headless shell 디렉터리 양쪽에 setuid `chrome-sandbox`를 둔다(v0.3.0).
+
+    원본 `chrome_sandbox`는 전체 Chromium 디렉터리에만 있으므로 headless shell 디렉터리에는 그것을 복사한다.
+    """
+    if not sys.platform.startswith("linux"):
+        return {"status": "not_applicable", "reason": "setuid 샌드박스는 Linux 전용입니다."}
+    source = find_helper_source(executable)
+    if not source:
+        return {"status": "failed", "reason": "chrome_sandbox 도우미를 번들 Chromium 디렉터리에서 찾지 못했습니다.", "executable": executable}
+    targets = [Path(d) / "chrome-sandbox" for d in helper_directories(executable)]
+    if not is_root():
+        return {"status": "needs_root", "method": "in_dir", "paths": [str(t) for t in targets],
+                "instructions": " && ".join(f"sudo cp {source} {t} && sudo chown root:root {t} && sudo chmod 4755 {t}" for t in targets)}
+    for target in targets:
+        shutil.copy2(source, target)
+        os.chown(target, 0, 0)
+        target.chmod(0o4755)
+    return {"status": "installed", "method": "in_dir", "paths": [str(t) for t in targets],
+            "scope": "이 설치 디렉터리의 Chromium/headless shell 전용(실행 파일이 사용자 소유가 아닌 설치에서 Chromium이 요구하는 방식)."}
+
+
 def install_suid(directory: str) -> dict:
     """v0.1.0 방식: Chromium 디렉터리 안에 setuid 도우미를 설치한다(설치 디렉터리를 따라다닌다)."""
     if not sys.platform.startswith("linux"):
@@ -661,6 +707,10 @@ async def doctor(config, launch: bool = True) -> dict:
         report["userns"] = userns_status()
         report["sandbox_helper"] = shared_helper_status()
         report["suid_sandbox"] = suid_status(layout["directory"])
+        # v0.3.0: 실행 파일이 사용자 소유가 아니면(apt 패키지, root가 푼 tarball) Chromium은 공용 도우미를 무시하고
+        # 실행 파일 옆의 chrome-sandbox만 쓴다. 그 사실과 headless shell 디렉터리의 도우미 상태를 함께 알린다.
+        report["executable_owned_by_user"] = owned_by_caller(executable)
+        report["in_dir_helpers"] = {d: suid_status(d).get("installed", False) for d in helper_directories(executable)}
         report["launch_env"] = launch_env(executable)
         apparmor = report["apparmor"]
         helper = report["sandbox_helper"]

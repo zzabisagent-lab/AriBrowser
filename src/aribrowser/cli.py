@@ -159,8 +159,23 @@ async def run_install_sandbox(args) -> int:
     method = "helper" if args.sandbox_method == "auto" else args.sandbox_method
     if method == "helper":
         result = sandbox.install_helper(executable)
+        # Chromium은 실행 파일이 실행 사용자 소유일 때만 공용 도우미(CHROME_DEVEL_SANDBOX)를 읽는다. root 소유 설치
+        # (/opt의 패키지, root가 푼 tarball)에는 실행 파일 옆의 chrome-sandbox가 필요하므로 그것도 함께 설치한다.
+        target_uid = None
+        sudo_user = os.environ.get("SUDO_USER")
+        if sudo_user and hasattr(os, "getuid"):
+            import pwd
+
+            try:
+                target_uid = pwd.getpwnam(sudo_user).pw_uid
+            except KeyError:
+                target_uid = None
+        owned = sandbox.owned_by_caller(executable, target_uid)
+        if owned is False and result.get("status") in {"installed", "needs_root"}:
+            result = {**result, "in_dir": sandbox.install_in_dir_helpers(executable),
+                      "note": "실행 파일이 사용자 소유가 아니므로 Chromium은 공용 도우미를 무시합니다. 실행 파일 옆에도 도우미를 설치했습니다."}
     elif method == "suid":
-        result = sandbox.install_suid(layout["directory"])
+        result = sandbox.install_in_dir_helpers(executable)
     else:
         result = sandbox.install_apparmor(layout["browsers_root"])
     output = {"install": result, "chromium": layout, **notes}

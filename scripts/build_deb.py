@@ -2,15 +2,17 @@
 
 tarball은 압축을 풀기만 하면 되지만 Ubuntu 24.04처럼 비특권 user namespace가 제한된 호스트에서는
 번들 Chromium의 샌드박스가 동작하지 않아 `sudo aribrowser --install-sandbox`를 한 번 더 실행해야
-한다. .deb는 그 단계를 패키지 수명주기에 연결한다.
+한다. .deb는 그 단계를 패키지 자체에 넣는다.
 
-- 설치(postinst): 공용 setuid 샌드박스 도우미를 /usr/local/lib/aribrowser/chrome-sandbox에 설치한다.
-  (Google Chrome .deb가 쓰는 것과 같은 방식. 전역 AppArmor/sysctl 설정은 바꾸지 않는다.)
-- 업그레이드: 설치 경로(/opt/aribrowser)가 바뀌지 않고 도우미는 경로·리비전과 무관하므로 설정이 유지된다.
-- 제거(prerm, 업그레이드가 아닌 remove/purge만): AriBrowser가 설치한 도우미와 AppArmor 정책만 제거한다.
-- 어떤 단계에서도 `--no-sandbox`를 켜지 않는다.
+- 패키지가 setuid root `chrome-sandbox`(Chromium이 제공하는 chrome_sandbox의 복사본, 4755)를 Chromium
+  디렉터리와 headless shell 디렉터리 안에 **함께 담는다**. Google Chrome .deb가 /opt/google/chrome/chrome-sandbox를
+  두는 것과 같은 방식이다. Chromium은 실행 파일이 사용자 소유가 아닐 때(/opt의 패키지) 환경 변수
+  CHROME_DEVEL_SANDBOX(공용 도우미)를 읽지 않고 실행 파일 옆의 chrome-sandbox만 쓴다.
+- 설치/업그레이드/제거는 모두 dpkg가 처리한다. 유지보수 스크립트가 /usr/local이나 /etc를 건드리지 않으므로
+  제거 시 패키지 파일만 사라지고, 설치 경로가 바뀌어도(/opt/aribrowser 고정) 샌드박스 설정이 유지된다.
+- 전역 AppArmor/sysctl 설정은 바꾸지 않으며 어떤 단계에서도 `--no-sandbox`를 켜지 않는다.
 
-패키지 내용: /opt/aribrowser(PyInstaller 번들 전체), /usr/bin/aribrowser(심볼릭 링크),
+패키지 내용: /opt/aribrowser(PyInstaller 번들 전체 + setuid chrome-sandbox), /usr/bin/aribrowser(심볼릭 링크),
 /usr/share/doc/aribrowser(README/CHANGELOG/copyright). 의존성은 Playwright가 Ubuntu 22.04/24.04에
 설치하는 Chromium 공유 라이브러리 목록을 양쪽 패키지 이름(t64 전환)으로 나열한다.
 
@@ -40,27 +42,17 @@ DEPENDS = [
 ]
 RECOMMENDS = ["fonts-liberation", "fonts-noto-color-emoji", "fonts-unifont", "fonts-ipafont-gothic", "fonts-wqy-zenhei"]
 
-POSTINST = """#!/bin/sh
-# AriBrowser 설치 후: 공용 setuid 샌드박스 도우미를 호스트당 한 번 설치한다(경로·리비전·사용자 무관).
-set -e
-if [ "$1" = "configure" ]; then
-  if out=$(/opt/aribrowser/aribrowser --install-sandbox --data-dir /var/lib/aribrowser 2>/dev/null); then
-    echo "aribrowser: sandbox helper installed at /usr/local/lib/aribrowser/chrome-sandbox"
-  else
-    echo "aribrowser: sandbox helper installation did not complete; run 'sudo aribrowser --install-sandbox' and 'aribrowser --doctor'" >&2
-  fi
-fi
-exit 0
-"""
-
-PRERM = """#!/bin/sh
-# AriBrowser 제거 전: 업그레이드가 아닌 remove/purge에서만 AriBrowser가 설치한 도우미와 정책을 제거한다.
-set -e
-if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
-  /opt/aribrowser/aribrowser --uninstall-sandbox >/dev/null 2>&1 || true
-fi
-exit 0
-"""
+def add_sandbox_helpers(browsers: Path) -> list[Path]:
+    """chrome_sandbox 원본을 찾아 Chromium 디렉터리와 headless shell 디렉터리에 `chrome-sandbox`로 복사한다."""
+    sources = sorted(browsers.glob("chromium-*/*/chrome_sandbox"))
+    if not sources:
+        return []
+    source = sources[-1]
+    targets = [source.parent / "chrome-sandbox"]
+    targets += [directory / "chrome-sandbox" for directory in sorted(browsers.glob("chromium_headless_shell-*/*/")) if directory.is_dir()]
+    for target in targets:
+        shutil.copy2(source, target)
+    return targets
 
 
 def debian_architecture() -> str:
@@ -90,6 +82,10 @@ def build(bundle: Path, output: Path) -> Path:
                 shutil.copy2(bundle / item, doc / item)
         if (bundle / "LICENSE").is_file():
             shutil.copy2(bundle / "LICENSE", doc / "copyright")
+        # setuid 샌드박스 도우미를 Chromium/headless shell 디렉터리에 넣는다(dpkg가 4755 root:root로 설치한다).
+        helpers = add_sandbox_helpers(opt / "_internal" / "playwright" / "driver" / "package" / ".local-browsers")
+        if not helpers:
+            raise SystemExit("번들에서 chrome_sandbox를 찾지 못해 setuid 도우미를 넣을 수 없습니다.")
         control_dir = root / "DEBIAN"
         control_dir.mkdir()
         # 빌드 호스트의 umask(예: 077)와 무관하게 모든 사용자가 읽고 실행할 수 있어야 한다. dpkg-deb도 DEBIAN
@@ -110,14 +106,13 @@ def build(bundle: Path, output: Path) -> Path:
             "Homepage: https://github.com/zzabisagent-lab/AriBrowser\n"
             "Description: Chromium-powered JSONL text browser for AI agents\n"
             " AriBrowser drives a bundled, sandboxed Chromium through a line-delimited JSON\n"
-            " protocol on stdin/stdout. This package installs the shared setuid sandbox\n"
-            " helper once per host so the bundled Chromium runs sandboxed on Ubuntu 24.04\n"
-            " without relaxing global security settings.\n", encoding="utf-8")
-        for script_name, body in (("postinst", POSTINST), ("prerm", PRERM)):
-            script = control_dir / script_name
-            script.write_text(body, encoding="utf-8")
-            script.chmod(0o755)
+            " protocol on stdin/stdout. This package ships the setuid sandbox helper next to\n"
+            " the bundled Chromium so it runs sandboxed on Ubuntu 24.04 without relaxing\n"
+            " global security settings.\n", encoding="utf-8")
         (control_dir / "control").chmod(0o644)
+        # 권한 정규화 뒤에 setuid 비트를 다시 건다(위 chmod가 4755의 setuid 비트를 지우지 않도록 마지막에 처리).
+        for helper in helpers:
+            helper.chmod(0o4755)
         target = output / name
         if target.exists():
             target.unlink()
